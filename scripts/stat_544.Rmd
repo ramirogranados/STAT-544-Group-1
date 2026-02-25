@@ -1,0 +1,70 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Load in data and view summary of each variable
+```{r}
+getwd()
+crashes <- read.csv(
+  "~/Desktop/STAT544/Crashes.csv",
+  na.strings = c("", " ", "  ", "   ", "-", "NA", "N/A", "NULL", "null", "Unknown", "UNKNOWN", "UNK")
+)
+```
+
+#view summary and the dimension of the data (168,332 rows and 80 variables)
+```{r}
+dim(crashes)
+
+summary(crashes)
+```
+
+#check for duplicates: all are unique
+```{r}
+duplicates_num = sum(duplicated(crashes)) 
+duplicates_num
+```
+
+#Finding the percentage of missing info from each variable.
+# For the variables missing 30% or more of the data, we will delete. (we deleted 5 variables)
+```{r}
+# percentage missing for each column
+missing_pct <- colMeans(is.na(crashes)) * 100
+
+# look at them, sorted high → low
+sort(round(missing_pct, 2), decreasing = TRUE)
+
+# choose a threshold for "too much" missingness
+high_miss_threshold <- 30  # percent
+
+# names of variables with > 30% missing
+high_miss_vars <- names(missing_pct)[missing_pct > high_miss_threshold]
+
+high_miss_vars   # just to see which ones they are
+
+crashes_red <- crashes[, !(names(crashes) %in% high_miss_vars)]
+```
+
+#let's look at frequency tables/bar charts
+
+#correlation
+```{r}
+
+```
+
+
+#skewness
+
+#outliers
+
+#Define severe accidents
+```{r}
+crashes_red$severe_binary <- ifelse(
+  crashes_red$COLLISION_SEVERITY %in% 
+    c("FATAL INJURY", "SUSPECTED SERIOUS INJURY OR SEVERE INJURY"),
+  1, 0
+)
+```
+
+
+#find SIGNIFICANT FEATURES USING T-TESTS or hypothesis tests
