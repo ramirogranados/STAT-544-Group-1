@@ -8,15 +8,8 @@ output: html_notebook
 getwd()
 crashes <- read.csv(
   "~/Desktop/STAT544/Crashes.csv",
-  na.strings = c("", " ", "  ", "   ", "-", "NA", "N/A", "NULL", "null", "Unknown", "UNKNOWN", "UNK")
+  na.strings = c("", " ", "  ", "   ", "-", " - ", "- " ,"NA", "N/A", "NULL", "null", "Unknown", "UNKNOWN", "UNK")
 )
-```
-
-#view summary and the dimension of the data (168,332 rows and 80 variables)
-```{r}
-dim(crashes)
-
-summary(crashes)
 ```
 
 #check for duplicates: all are unique
@@ -44,6 +37,58 @@ high_miss_vars   # just to see which ones they are
 
 crashes_red <- crashes[, !(names(crashes) %in% high_miss_vars)]
 ```
+#check new percentages
+```{r}
+# percentage missing for each column
+missing_pct <- colMeans(is.na(crashes_red)) * 100
+
+# look at them, sorted high → low
+sort(round(missing_pct, 2), decreasing = TRUE)
+
+```
+
+# Get rid of variables we previously agreed to drop in case it wasnt dropped previously
+```{r}
+# Vector of deprecated variables (from codebook)
+vars_to_remove <- c(
+  "CASE_ID",
+  "ACCIDENT_YEAR",
+  "PROC_DATE",
+  "OFFICER_ID",
+  "ROUTE_SUFFIX",
+  "POSTMILE_PREFIX",
+  "REPORTING_DISTRICT"
+)
+
+# Remove only those that actually exist in your dataset
+vars_to_remove <- vars_to_remove[vars_to_remove %in% names(crashes)]
+
+# Drop them
+crashes_red <- crashes_red[, !(names(crashes_red) %in% vars_to_remove)]
+
+# Check new dimensions
+dim(crashes_red)
+```
+
+#change variables with responses Y or N to ones and zeros (respectively)
+```{r}
+# Find columns that contain only Y/N (ignoring NA)
+yn_cols <- names(crashes_red)[
+  sapply(crashes_red, function(x) {
+    if (is.character(x) || is.factor(x)) {
+      vals <- unique(na.omit(x))
+      all(vals %in% c("Y", "N"))
+    } else FALSE
+  })
+]
+
+# Convert them
+crashes_red[yn_cols] <- lapply(crashes_red[yn_cols], function(x) {
+  x <- as.character(x)
+  ifelse(x == "Y", 1,
+         ifelse(x == "N", 0, NA))
+})
+```
 
 #let's look at frequency tables/bar charts
 
@@ -57,13 +102,9 @@ crashes_red <- crashes[, !(names(crashes) %in% high_miss_vars)]
 
 #outliers
 
-#Define severe accidents
+#Define severe accidentS
 ```{r}
-crashes_red$severe_binary <- ifelse(
-  crashes_red$COLLISION_SEVERITY %in% 
-    c("FATAL INJURY", "SUSPECTED SERIOUS INJURY OR SEVERE INJURY"),
-  1, 0
-)
+
 ```
 
 
