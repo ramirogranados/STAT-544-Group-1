@@ -1,0 +1,138 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Load in data and view summary of each variable
+```{r}
+getwd()
+crashes <- read.csv(
+  "~/Desktop/STAT544/Crashes.csv",
+  na.strings = c("", " ", "  ", "   ", "-", " - ", "- " ,"NA", "N/A", "NULL", "null", "Unknown", "UNKNOWN", "UNK")
+)
+```
+
+#check for duplicates: all are unique
+```{r}
+duplicates_num = sum(duplicated(crashes)) 
+duplicates_num
+```
+
+#Looking at some of the variables that may be represented as having a lot of missing information (y or otherwise blank). change to 0s and 1s. (look in code book for "Y or blank")
+```{r}
+yn_vars <- c("PEDESTRIAN_ACCIDENT",
+             "BICYCLE_ACCIDENT",
+             "MOTORCYCLE_ACCIDENT",
+             "TRUCK_ACCIDENT",
+             "NOT_PRIVATE_PROPERTY",
+             "ALCOHOL_INVOLVED")
+
+crashes[yn_vars] <- lapply(crashes[yn_vars], function(x) {
+  x <- toupper(trimws(as.character(x)))
+  as.integer(!is.na(x) & x == "Y")
+})
+
+sapply(crashes[yn_vars], function(v) c(unique = paste(sort(unique(v)), collapse=", "),
+                                       nNA = sum(is.na(v))))
+
+head(crashes[yn_vars], 100)
+tail(crashes[yn_vars], 100)
+```
+#Now go through the variables that have Y, N, and blank responses. Y to 1, N to 0, and blank to NA
+```{r}
+yn_cols <- names(crashes)[
+  sapply(crashes, function(x) {
+    if (is.character(x) || is.factor(x)) {
+      vals <- unique(trimws(as.character(na.omit(x))))
+      all(vals %in% c("Y", "N"))
+    } else FALSE
+  })
+]
+
+crashes[yn_cols] <- lapply(crashes[yn_cols], function(x) {
+  x <- trimws(as.character(x))   # remove accidental spaces
+  
+  x[x == ""] <- NA              # treat blank as NA
+  
+  ifelse(x == "Y", 1,
+         ifelse(x == "N", 0, NA))
+})
+```
+
+
+#Finding the percentage of missing info from each variable.
+# For the variables missing 30% or more of the data, we will delete. (we deleted 5 variables)
+```{r}
+# percentage missing for each column
+missing_pct <- colMeans(is.na(crashes)) * 100
+
+# look at them, sorted high → low
+sort(round(missing_pct, 2), decreasing = TRUE)
+
+# choose a threshold for "too much" missingness
+high_miss_threshold <- 30  # percent
+
+# names of variables with > 30% missing
+high_miss_vars <- names(missing_pct)[missing_pct > high_miss_threshold]
+
+high_miss_vars   # just to see which ones they are
+
+crashes_red <- crashes[, !(names(crashes) %in% high_miss_vars)]
+```
+#check new percentages
+```{r}
+# percentage missing for each column
+missing_pct <- colMeans(is.na(crashes_red)) * 100
+
+# look at them, sorted high → low
+sort(round(missing_pct, 2), decreasing = TRUE)
+
+```
+
+# Get rid of variables we previously agreed to drop in case it wasnt dropped previously
+```{r}
+# Vector of deprecated variables (from codebook)
+vars_to_remove <- c(
+  "CASE_ID",
+  "ACCIDENT_YEAR",
+  "PROC_DATE",
+  "OFFICER_ID",
+  "ROUTE_SUFFIX",
+  "POSTMILE_PREFIX",
+  "REPORTING_DISTRICT"
+)
+
+# Remove only those that actually exist in your dataset
+vars_to_remove <- vars_to_remove[vars_to_remove %in% names(crashes)]
+
+# Drop them
+crashes_red <- crashes_red[, !(names(crashes_red) %in% vars_to_remove)]
+
+# Check new dimensions
+dim(crashes_red)
+```
+
+#check summary once again
+```{r}
+summary(crashes_red)
+```
+
+#let's look at frequency tables/bar charts
+
+#correlation
+```{r}
+
+```
+
+
+#skewness
+
+#outliers
+
+#Define severe accident
+```{r}
+
+```
+
+
+#find SIGNIFICANT FEATURES USING T-TESTS or hypothesis tests
