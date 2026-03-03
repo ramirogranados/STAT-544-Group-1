@@ -118,16 +118,130 @@ summary(crashes_red)
 ```
 
 #let's look at frequency tables/bar charts
+```{r}
+#look for numerical variables
+num_vars <- names(crashes_red)[sapply(crashes_red, is.numeric)]
+
+#create frequency tables (discrete numeric only)
+for (v in num_vars) {
+  
+  unique_vals <- length(unique(na.omit(crashes_red[[v]])))
+  
+  if (unique_vals <= 20) {
+    cat("\n==============================\n")
+    cat("Variable:", v, "\n")
+    print(table(crashes_red[[v]], useNA = "ifany"))
+  }
+}
+
+#histograms (continuous)
+library(ggplot2)
+
+for (v in num_vars) {
+  
+  x <- crashes_red[[v]]
+  
+  if (length(unique(na.omit(x))) > 10) {
+    
+    p <- ggplot(crashes_red, aes(x = .data[[v]])) +
+      geom_histogram(bins = 30, fill = "lightblue", color = "white") +
+      labs(title = paste("Histogram of", v))
+    
+    print(p)
+  }
+}
+```
 
 #correlation
+```{r}
+library(corrplot)
+library(readr)
+library(tidyverse)
+
+# Compute matrix
+numeric_data = crashes_red %>% dplyr::select(where(is.numeric))
+cor_matrix = cor(numeric_data, use = "pairwise.complete.obs")
+
+hi_cor = c()
+med_cor = c()
+
+for (i in 1:11) {
+  for (j in 1:11) {
+    # skip self-correlations
+    if (i < j) {
+      r_ij = cor_matrix[i, j]
+
+      # high correlation (>= 0.8)
+      if (abs(r_ij) >= 0.8) {
+        x = paste(colnames(numeric_data)[i], colnames(numeric_data)[j])
+        hi_cor = c(hi_cor, x)
+      }
+
+      # medium correlation (0.5–0.8)
+      if (abs(r_ij) >= 0.5 && abs(r_ij) < 0.8) {
+        x = paste(colnames(numeric_data)[i], colnames(numeric_data)[j])
+        med_cor = c(med_cor, x)
+      }
+    }
+  }
+}
+
+print("High Correlation (>= 0.8):")
+hi_cor
+
+print("Moderate Correlation(0.5-0.8):")
+med_cor
+```
+### we can probably get rid of CHP_SHIFT, BEAT_TYPE, CHP_BEAT_CLASS. run correlation code again
+```{r}
+cols_to_drop <- c("CHP_SHIFT", "BEAT_TYPE", "CHP_BEAT_CLASS")
+
+crashes_red <- crashes_red[ , !(names(crashes_red) %in% cols_to_drop)]
+
+# Compute matrix
+numeric_data = crashes_red %>% dplyr::select(where(is.numeric))
+cor_matrix = cor(numeric_data, use = "pairwise.complete.obs")
+
+hi_cor = c()
+med_cor = c()
+
+for (i in 1:11) {
+  for (j in 1:11) {
+    # skip self-correlations
+    if (i < j) {
+      r_ij = cor_matrix[i, j]
+
+      # high correlation (>= 0.8)
+      if (abs(r_ij) >= 0.8) {
+        x = paste(colnames(numeric_data)[i], colnames(numeric_data)[j])
+        hi_cor = c(hi_cor, x)
+      }
+
+      # medium correlation (0.5–0.8)
+      if (abs(r_ij) >= 0.5 && abs(r_ij) < 0.8) {
+        x = paste(colnames(numeric_data)[i], colnames(numeric_data)[j])
+        med_cor = c(med_cor, x)
+      }
+    }
+  }
+}
+
+print("High Correlation (>= 0.8):")
+hi_cor
+
+print("Moderate Correlation(0.5-0.8):")
+med_cor
+```
+
+#skewness
 ```{r}
 
 ```
 
-
-#skewness
-
 #outliers
+```{r}
+
+```
 
 #Define severe accident
 ```{r}
@@ -135,4 +249,4 @@ summary(crashes_red)
 ```
 
 
-#find SIGNIFICANT FEATURES USING T-TESTS or hypothesis tests
+#Fit simple models/model selection
