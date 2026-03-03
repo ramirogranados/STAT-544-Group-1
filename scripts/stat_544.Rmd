@@ -18,6 +18,48 @@ duplicates_num = sum(duplicated(crashes))
 duplicates_num
 ```
 
+#Looking at some of the variables that may be represented as having a lot of missing information (y or otherwise blank). change to 0s and 1s. (look in code book for "Y or blank")
+```{r}
+yn_vars <- c("PEDESTRIAN_ACCIDENT",
+             "BICYCLE_ACCIDENT",
+             "MOTORCYCLE_ACCIDENT",
+             "TRUCK_ACCIDENT",
+             "NOT_PRIVATE_PROPERTY",
+             "ALCOHOL_INVOLVED")
+
+crashes[yn_vars] <- lapply(crashes[yn_vars], function(x) {
+  x <- toupper(trimws(as.character(x)))
+  as.integer(!is.na(x) & x == "Y")
+})
+
+sapply(crashes[yn_vars], function(v) c(unique = paste(sort(unique(v)), collapse=", "),
+                                       nNA = sum(is.na(v))))
+
+head(crashes[yn_vars], 100)
+tail(crashes[yn_vars], 100)
+```
+#Now go through the variables that have Y, N, and blank responses. Y to 1, N to 0, and blank to NA
+```{r}
+yn_cols <- names(crashes)[
+  sapply(crashes, function(x) {
+    if (is.character(x) || is.factor(x)) {
+      vals <- unique(trimws(as.character(na.omit(x))))
+      all(vals %in% c("Y", "N"))
+    } else FALSE
+  })
+]
+
+crashes[yn_cols] <- lapply(crashes[yn_cols], function(x) {
+  x <- trimws(as.character(x))   # remove accidental spaces
+  
+  x[x == ""] <- NA              # treat blank as NA
+  
+  ifelse(x == "Y", 1,
+         ifelse(x == "N", 0, NA))
+})
+```
+
+
 #Finding the percentage of missing info from each variable.
 # For the variables missing 30% or more of the data, we will delete. (we deleted 5 variables)
 ```{r}
@@ -70,24 +112,9 @@ crashes_red <- crashes_red[, !(names(crashes_red) %in% vars_to_remove)]
 dim(crashes_red)
 ```
 
-#change variables with responses Y or N to ones and zeros (respectively)
+#check summary once again
 ```{r}
-# Find columns that contain only Y/N (ignoring NA)
-yn_cols <- names(crashes_red)[
-  sapply(crashes_red, function(x) {
-    if (is.character(x) || is.factor(x)) {
-      vals <- unique(na.omit(x))
-      all(vals %in% c("Y", "N"))
-    } else FALSE
-  })
-]
-
-# Convert them
-crashes_red[yn_cols] <- lapply(crashes_red[yn_cols], function(x) {
-  x <- as.character(x)
-  ifelse(x == "Y", 1,
-         ifelse(x == "N", 0, NA))
-})
+summary(crashes_red)
 ```
 
 #let's look at frequency tables/bar charts
@@ -102,7 +129,7 @@ crashes_red[yn_cols] <- lapply(crashes_red[yn_cols], function(x) {
 
 #outliers
 
-#Define severe accidentS
+#Define severe accident
 ```{r}
 
 ```
