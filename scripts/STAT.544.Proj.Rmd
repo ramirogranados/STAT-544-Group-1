@@ -1,0 +1,199 @@
+---
+title: "STAT 544 Victims"
+author: "Ramiro Granados"
+date: "2026-02-25"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(stringr)
+library(readr)
+```
+
+```{r}
+victims_raw <- read_csv("Victims.csv", show_col_types = FALSE) %>%
+  clean_names()  # makes names like case_id, victim_age, etc.
+
+glimpse(victims_raw)
+
+# Convert to numeric 
+to_num <- function(x) readr::parse_number(as.character(x))
+
+#deal with blanks n all that
+na_if_unknown_chr <- function(x) {
+  x <- str_trim(as.character(x))
+  x <- na_if(x, "")
+  x <- na_if(x, "-")
+  x
+}
+```
+
+```{r}
+
+victims_clean <- victims_raw %>%
+  mutate(
+  
+    across(where(is.character), ~ str_trim(.x)),
+
+    victim_seating_position_num = to_num(victim_seating_position),
+    victim_ejected_num          = to_num(victim_ejected),
+
+    victim_seating_position = na_if_unknown_chr(victim_seating_position),
+    victim_ejected          = na_if_unknown_chr(victim_ejected),
+    victim_safety_equip_1    = na_if_unknown_chr(victim_safety_equip_1),
+    victim_safety_equip_2    = na_if_unknown_chr(victim_safety_equip_2),
+    victim_sex              = na_if_unknown_chr(victim_sex),
+    city                    = na_if_unknown_chr(city),
+    county                  = na_if_unknown_chr(county)
+  )
+
+victims_clean %>%
+  summarise(across(everything(), ~ sum(is.na(.x)))) %>%
+  pivot_longer(everything(), names_to = "col", values_to = "na_count") %>%
+  arrange(desc(na_count)) %>%
+  print(n = 50)
+```
+
+```{r}
+
+#Logic & Integrity Checks
+
+# check unique
+victims_clean %>%
+  count(case_id, party_number, victim_number, name = "n") %>%
+  filter(n > 1) %>%
+  arrange(desc(n)) %>%
+  print(n = 20)
+
+victims_clean %>%
+  summarise(
+    age_min = min(victim_age, na.rm = TRUE),
+    age_max = max(victim_age, na.rm = TRUE),
+    n_age_0 = sum(victim_age == 0, na.rm = TRUE),
+    n_age_998 = sum(victim_age == 998, na.rm = TRUE)
+  )
+
+victims_clean <- victims_clean %>%
+  mutate(
+    victim_age_original = victim_age,
+    victim_age = na_if(victim_age, 0),
+    victim_age = na_if(victim_age, 998),
+    victim_age_missing_flag = if_else(is.na(victim_age), 1L, 0L)
+  )
+
+victims_clean <- victims_clean %>%
+  mutate(
+    victim_age = if_else(!is.na(victim_age) & victim_age > 110, 110, victim_age)
+  )
+
+victims_clean %>%
+  count(accident_year) %>%
+  arrange(accident_year)
+```
+
+```{r}
+# Transformations
+
+victims_math <- victims_clean %>%
+  mutate(
+    victim_age_z = as.numeric(scale(victim_age))  # if we got NA age then the z score will also be NA
+  )
+```
+
+```{r}
+
+victims_feat <- victims_math %>%
+  mutate(
+    age_group = case_when(
+      is.na(victim_age)            ~ "Unknown",
+      victim_age < 13              ~ "Child",
+      victim_age >= 13 & victim_age < 18 ~ "Teen",
+      victim_age >= 18 & victim_age < 35 ~ "Young Adult",
+      victim_age >= 35 & victim_age < 55 ~ "Adult",
+      victim_age >= 55             ~ "Senior"
+    ),
+    age_group = factor(age_group,
+                       levels = c("Child","Teen","Young Adult","Adult","Senior","Unknown"))
+  )
+
+
+city_counts <- victims_feat %>% count(city, sort = TRUE)
+rare_cities <- city_counts %>% filter(n < 200) %>% pull(city)
+
+victims_feat <- victims_feat %>%
+  mutate(
+    city_collapsed = if_else(city %in% rare_cities | is.na(city), "Other/Unknown", city)
+  )
+
+victims_feat <- victims_feat %>%
+  mutate(
+    equip1_known = if_else(is.na(victim_safety_equip_1), 0L, 1L),
+    equip2_known = if_else(is.na(victim_safety_equip_2), 0L, 1L),
+    any_equip_known = if_else(equip1_known == 1L | equip2_known == 1L, 1L, 0L)
+  )
+```
+
+```{r}
+victims_final <- victims_feat %>%
+  mutate(
+    victim_sex = factor(victim_sex),
+    victim_role = factor(victim_role),
+    victim_degree_of_injury = factor(victim_degree_of_injury),
+    victim_seating_position_raw = factor(victim_seating_position),
+    victim_ejected_raw = factor(victim_ejected)
+  )
+
+# Output: cleaned dataset + quick summary tables
+
+glimpse(victims_final)
+
+# Save cleaned data for the rest of your workflow
+write_csv(victims_final, "Victims_cleaned.csv")
+
+# A few quick summary views (useful in Rmd)
+victims_final %>% count(victim_sex, sort = TRUE)
+victims_final %>% count(victim_degree_of_injury, sort = TRUE)
+victims_final %>% count(age_group, sort = TRUE)
+victims_final %>% count(city_collapsed, sort = TRUE)
+
+```
+
+```{r}
+glimpse(victims_final)
+```
+
+
+
+
+```{r}
+levels(victims_final$victim_sex)
+```
+
+```{r}
+table(victims_final$victim_sex, useNA = "ifany")
+```
+
+```{r}
+#We run t-test on F vs M only. the two-sample t-test because the dataset has another cat (‘X’, n=18) and missing values. Including >2 levels violates t-test assumptions.
+
+victims_sex_FM <- victims_final %>%
+  filter(victim_sex %in% c("F", "M")) %>%   # drops X and NA
+  droplevels() %>%
+  filter(!is.na(victim_age))                # ensure age is present
+
+table(victims_sex_FM$victim_sex)
+
+t.test(victim_age ~ victim_sex, data = victims_sex_FM)
+
+mean_age <- victims_sex_FM %>%
+  group_by(victim_sex) %>%
+  summarise(mean_age = mean(victim_age), sd_age = sd(victim_age), n = n())
+
+mean_age
+```
+
+
