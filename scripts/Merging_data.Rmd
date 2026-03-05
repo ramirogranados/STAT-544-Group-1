@@ -1,0 +1,129 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# --- read (you already do this) ---
+na_tokens <- c("NA","N/A","NULL","null")
+crashes  <- read.csv("Crashes.csv",  na.strings = na_tokens, stringsAsFactors = FALSE)
+parties  <- read.csv("Parties.csv",  na.strings = na_tokens, stringsAsFactors = FALSE)
+victims  <- read.csv("Victims.csv",  na.strings = na_tokens, stringsAsFactors = FALSE)
+merged_theirs <- read.csv("merged_switrs_data.csv", na.strings = na_tokens, stringsAsFactors = FALSE)
+
+library(dplyr)
+
+# --- aggregate parties to crash-level ---
+parties_agg <- parties %>%
+  group_by(CASE_ID) %>%
+  summarise(
+    party_count_check = n(), 
+    any_dui = any(PARTY_SOBRIETY == "B", na.rm = TRUE),        # B = Had Been Drinking, Under Influence
+    any_drug = any(PARTY_DRUG_PHYSICAL == "E", na.rm = TRUE),  # E = Under Drug Influence
+    .groups = "drop"
+  )
+
+# --- aggregate victims to crash-level ---
+# Use VICTIM_DEGREE_OF_INJURY: "1" == killed; other numeric codes indicate injury severity.
+victims_agg <- victims %>%
+  group_by(CASE_ID) %>%
+  summarise(
+    victim_count_check = n(),
+    killed_check = sum(VICTIM_DEGREE_OF_INJURY == "1", na.rm = TRUE),       # count killed victims
+    injured_count = sum(VICTIM_DEGREE_OF_INJURY %in% c("2","3","4","5","6","7"), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# --- join to crashes (keeps crash-level rows) ---
+merged_correct <- crashes %>%
+  left_join(parties_agg, by = "CASE_ID") %>%
+  left_join(victims_agg, by = "CASE_ID")
+
+# --- quick diagnostics ---
+cat("rows: crashes =", nrow(crashes), 
+    "  merged_correct =", nrow(merged_correct),
+    "  merged_theirs =", nrow(merged_theirs), "\n")
+
+cat("unique CASE_ID in merged_theirs:", length(unique(merged_theirs$CASE_ID)), "\n")
+cat("unique CASE_ID in merged_correct:", length(unique(merged_correct$CASE_ID)), "\n")
+
+# Compare key sums (should match if theirs aggregated correctly)
+cat("sum NUMBER_KILLED — correct:", sum(merged_correct$NUMBER_KILLED, na.rm = TRUE),
+    "  theirs:", sum(merged_theirs$NUMBER_KILLED, na.rm = TRUE), "\n")
+
+# Exact equality test (structure + values) — will flag mismatches
+# align sort order and compare — this will error if column sets differ; handle carefully
+common_cols <- intersect(names(merged_correct), names(merged_theirs))
+manual_sorted <- merged_correct %>% arrange(CASE_ID) %>% select(all_of(common_cols))
+theirs_sorted <- merged_theirs  %>% arrange(CASE_ID) %>% select(all_of(common_cols))
+
+cat("all.equal(manual_sorted, theirs_sorted) ->\n")
+print(all.equal(manual_sorted, theirs_sorted))
+# If not equal, find which CASE_IDs differ
+anti_manual <- dplyr::anti_join(manual_sorted, theirs_sorted, by = "CASE_ID")
+anti_theirs <- dplyr::anti_join(theirs_sorted, manual_sorted, by = "CASE_ID")
+cat("rows in manual but not in theirs:", nrow(anti_manual), 
+    " rows in theirs but not in manual:", nrow(anti_theirs), "\n")
+```
+
+```{r}
+library(dplyr)
+
+# Unique CASE_IDs
+cat("unique crash ids - crashes:", length(unique(crashes$CASE_ID)),
+    " merged_correct:", length(unique(merged_correct$CASE_ID)),
+    " merged_theirs:", length(unique(merged_theirs$CASE_ID)), "\n")
+
+# How many rows per CASE_ID in their file
+dup_counts <- merged_theirs %>% count(CASE_ID, name = "rows_theirs")
+dup_counts %>% summarise(
+  min = min(rows_theirs),
+  median = median(rows_theirs),
+  mean = mean(rows_theirs),
+  max = max(rows_theirs)
+) %>% print()
+
+# Show the top 10 most-duplicated crashes
+dup_counts %>% arrange(desc(rows_theirs)) %>% head(10) %>% print()
+
+# Totals (if present)
+sum_correct_killed <- sum(merged_correct$NUMBER_KILLED, na.rm = TRUE)
+sum_theirs_killed  <- sum(merged_theirs$NUMBER_KILLED, na.rm = TRUE)
+
+sum_correct_inj <- sum(merged_correct$NUMBER_INJURED, na.rm = TRUE)
+sum_theirs_inj  <- sum(merged_theirs$NUMBER_INJURED, na.rm = TRUE)
+
+cat("NUMBER_KILLED - manual:", sum_correct_killed, "theirs:", sum_theirs_killed, "\n")
+cat("NUMBER_INJURED - manual:", sum_correct_inj, "theirs:", sum_theirs_inj, "\n")
+
+# pick one of the most-duplicated CASE_IDs
+top_case <- dup_counts %>% arrange(desc(rows_theirs)) %>% slice(1) %>% pull(CASE_ID)
+
+# rows in their file for that case
+their_rows <- merged_theirs %>% filter(CASE_ID == top_case)
+manual_row <- merged_correct %>% filter(CASE_ID == top_case)
+
+print(top_case)
+print("THEIRS rows:")
+print(their_rows)
+print("MANUAL row:")
+print(manual_row)
+```
+```{r}
+# Assuming parties_agg and victims_agg were created as before
+merged_fixed <- crashes %>%
+  left_join(parties_agg,  by = "CASE_ID") %>%
+  left_join(victims_agg,  by = "CASE_ID")
+
+# Should equal crash count
+stopifnot(nrow(merged_fixed) == nrow(crashes))
+cat("merged_fixed rows =", nrow(merged_fixed), "crashes rows =", nrow(crashes), "\n")
+
+# Compare key totals to their file (to show the error)
+cat("NUMBER_KILLED - fixed:", sum(merged_fixed$NUMBER_KILLED, na.rm=TRUE),
+    " theirs:", sum(merged_theirs$NUMBER_KILLED, na.rm=TRUE), "\n")
+
+write.csv(merged_fixed, "merged_fixed_switrs.csv", row.names = FALSE)
+```
+
+
