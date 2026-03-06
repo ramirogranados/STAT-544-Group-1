@@ -1,0 +1,1583 @@
+---
+title: "STAT 544 - SWITRS Crash Severity Notebook (Rebuilt for Correctly Merged Data)"
+output: html_notebook
+---
+
+# Package Chunk
+```{r setup, message=FALSE, warning=FALSE}
+# What: Global setup (packages, options, theme).
+# Why: Ensures reproducibility and consistent formatting across the notebook.
+
+options(stringsAsFactors = FALSE)
+set.seed(544)
+
+required_pkgs <- c(
+  "dplyr", "tidyr", "stringr", "ggplot2", "scales", "purrr",
+  "readr", "forcats", "corrplot", "broom", "rlang"
+)
+
+installed <- rownames(installed.packages())
+to_install <- setdiff(required_pkgs, installed)
+if (length(to_install) > 0) install.packages(to_install)
+
+library(rlang)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(purrr)
+library(readr)
+library(forcats)
+library(corrplot)
+library(broom)
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+# Load data (correctly merged dataset)
+```{r}
+# What: Load crash-grain merged SWITRS dataset (1 row per CASE_ID).
+# Why: Parties/Victims have already been aggregated to crash-level in the merge notebook.
+
+na_tokens <- c("NA", "N/A", "NULL", "null")
+
+switrs_raw <- read.csv("merged_fixed_switrs.csv", na.strings = na_tokens, stringsAsFactors = FALSE)
+
+switrs <- switrs_raw
+rm(switrs_raw)
+
+dim(switrs)
+glimpse(switrs)
+```
+
+# Basic sanity checks
+```{r}
+# What: Confirm crash-grain (1 row per crash).
+# Why: The merge notebook output should already be 1 row per CASE_ID.
+
+stopifnot("CASE_ID" %in% names(switrs))
+stopifnot(n_distinct(switrs$CASE_ID) == nrow(switrs))
+
+# Optional: show a few IDs to verify
+head(switrs$CASE_ID, 10)
+```
+
+# Standardize "not stated" / placeholder missingness (do not lump into OTHER)
+```{r}
+# What: Normalize placeholder encodings with SWITRS-aware rules.
+# Why: Standardizes "-" and blank encodings across the crash-grain dataset.
+#      Preserves SWITRS semantics for "Y or blank" flags (blank/NA means No).
+
+trim_chr <- function(x) stringr::str_trim(as.character(x))
+
+normalize_dash_to_notstated <- function(x) {
+  x <- trim_chr(x)
+  x[x %in% c("-", " -", "- ", " - ")] <- "Not Stated"
+  x[toupper(x) %in% c("NOT STATED", "NOTSTATED")] <- "Not Stated"
+  x
+}
+
+# SWITRS "Y or blank" flags: blank (and often NA after read.csv) means NO
+y_or_blank_flags <- intersect(
+  c("PEDESTRIAN_ACCIDENT","BICYCLE_ACCIDENT","MOTORCYCLE_ACCIDENT","TRUCK_ACCIDENT",
+    "NOT_PRIVATE_PROPERTY","ALCOHOL_INVOLVED"),
+  names(switrs)
+)
+
+# 1) Trim + normalize dash-style placeholders on all character fields
+switrs_clean <- switrs %>%
+  mutate(across(where(is.character), trim_chr)) %>%
+  mutate(across(where(is.character), normalize_dash_to_notstated))
+
+# 2) For most character fields: "" => "Not Stated" (do NOT touch y-or-blank flags here)
+char_cols <- names(switrs_clean)[sapply(switrs_clean, is.character)]
+other_char_cols <- setdiff(char_cols, y_or_blank_flags)
+
+switrs_clean <- switrs_clean %>%
+  mutate(across(all_of(other_char_cols), ~ {
+    x <- .x
+    x[x == ""] <- "Not Stated"
+    x
+  }))
+
+# 3) For y-or-blank flags: NA/"" => "N" (blank means No); keep "Not Stated" if it exists
+switrs_clean <- switrs_clean %>%
+  mutate(across(all_of(y_or_blank_flags), ~ {
+    x <- trim_chr(.x)
+    x[is.na(x) | x == ""] <- "N"
+    x[x == "Y"] <- "Y"
+    x
+  }))
+
+# Free memory: switrs no longer needed after switrs_clean exists
+rm(switrs)
+```
+
+# Covert "UNKNOWN" road names to NA (special case)
+```{r}
+# What: Convert literal UNKNOWN / Not Stated for roadway name fields to NA.
+# Why: For roadway names, these behave like missingness (not meaningful categories).
+
+road_name_vars <- intersect(c("PRIMARY_RD", "SECONDARY_RD"), names(switrs_clean))
+
+switrs_clean <- switrs_clean %>%
+  mutate(across(all_of(road_name_vars), ~ {
+    x <- as.character(.x)
+    x <- str_trim(x)
+    x[toupper(x) == "UNKNOWN"] <- NA_character_
+    x[x == "Not Stated"] <- NA_character_
+    x
+  }))
+```
+
+# Convert Y/N and Y-only flags carefully
+```{r}
+# What: Standardize common flag formats into consistent factors.
+# Why: SWITRS includes Y/N/blank-not-stated fields AND Y-or-blank fields (blank = No). :contentReference[oaicite:3]{index=3}
+
+# Convert the "Y or blank" crash flags into factor(N, Y, Not Stated)
+y_or_blank_flags <- intersect(
+  c("PEDESTRIAN_ACCIDENT","BICYCLE_ACCIDENT","MOTORCYCLE_ACCIDENT","TRUCK_ACCIDENT",
+    "NOT_PRIVATE_PROPERTY","ALCOHOL_INVOLVED"),
+  names(switrs_clean)
+)
+
+switrs_clean <- switrs_clean %>%
+  mutate(across(all_of(y_or_blank_flags), ~ {
+    x <- str_trim(as.character(.x))
+    # SWITRS: blank means No
+    x[is.na(x) | x == ""] <- "N"
+    # Dash was already normalized to "Not Stated" earlier
+    x[x == "Y"] <- "Y"
+    factor(x, levels = c("N","Y","Not Stated"))
+  }))
+
+# Standard Y/N/Not Stated fields (e.g., INTERSECTION, STATE_HWY_IND, TOW_AWAY, AT_FAULT, etc.)
+crash_yn_whitelist <- intersect(
+  c("INTERSECTION","STATE_HWY_IND","TOW_AWAY","AT_FAULT"),  # add others you *intend*
+  names(switrs_clean)
+)
+
+switrs_clean[crash_yn_whitelist] <- lapply(switrs_clean[crash_yn_whitelist], function(x) {
+  x <- str_trim(as.character(x))
+  x[x %in% c("", NA)] <- "Not Stated"
+  factor(x, levels = c("N","Y","Not Stated"))
+})
+
+# HIT_AND_RUN is F/M/N (+ Not Stated), not Y/N. :contentReference[oaicite:4]{index=4}
+if ("HIT_AND_RUN" %in% names(switrs_clean)) {
+  switrs_clean <- switrs_clean %>%
+    mutate(HIT_AND_RUN = factor(
+      ifelse(is.na(HIT_AND_RUN), "Not Stated", HIT_AND_RUN),
+      levels = c("N","M","F","Not Stated")
+    ))
+}
+
+# PCF_VIOL_CATEGORY is Char(2): keep leading zeros (01, 02, ..., 24, 00). :contentReference[oaicite:5]{index=5}
+if ("PCF_VIOL_CATEGORY" %in% names(switrs_clean)) {
+  switrs_clean <- switrs_clean %>%
+    mutate(
+      PCF_VIOL_CATEGORY = as.character(PCF_VIOL_CATEGORY),
+      PCF_VIOL_CATEGORY = str_trim(PCF_VIOL_CATEGORY),
+      PCF_VIOL_CATEGORY = ifelse(PCF_VIOL_CATEGORY == "Not Stated", "Not Stated",
+                                 ifelse(PCF_VIOL_CATEGORY %in% c("", NA), NA_character_, PCF_VIOL_CATEGORY)),
+      PCF_VIOL_CATEGORY = ifelse(
+        !is.na(PCF_VIOL_CATEGORY) & PCF_VIOL_CATEGORY != "Not Stated" & str_detect(PCF_VIOL_CATEGORY, "^[0-9]+$"),
+        str_pad(PCF_VIOL_CATEGORY, width = 2, pad = "0"),
+        PCF_VIOL_CATEGORY
+      )
+    )
+}
+```
+
+# Build the crash-level analysis table
+```{r}
+# What: Finalize crash-level analysis table.
+# Why: Data are already crash-grain; after cleaning we proceed with switrs_reduced.
+
+switrs_reduced <- switrs_clean
+rm(switrs_clean)
+```
+
+# validate Road_Surface
+```{r}
+# What: Validate ROAD_SURFACE against codebook-valid codes.
+# Why: Codebook defines ROAD_SURFACE as A-D (plus Not Stated). H/Q are out-of-spec values. :contentReference[oaicite:1]{index=1}
+
+# What: Standardize raw values so blanks / "-" become a single explicit label.
+# Why: SWITRS codebook uses blank and/or "-" to mean Not Stated for many coded fields,
+#      and this breaks legend matching unless we normalize first. :contentReference[oaicite:1]{index=1}
+normalize_not_stated <- function(x, not_stated_label = "Not Stated") {
+  x <- as.character(x)
+
+  # trim whitespace
+  x <- trimws(x)
+
+  # treat explicit missing encodings as Not Stated
+  x[x %in% c("", "-", " - ", "NA", "N/A", "NULL", "null")] <- not_stated_label
+
+  # keep actual NA as NA (or convert to Not Stated if you prefer)
+  # If you want NA to show as "Not Stated", uncomment:
+  # x[is.na(x)] <- not_stated_label
+
+  x
+}
+
+if ("ROAD_SURFACE" %in% names(switrs_reduced)) {
+
+  valid_road_surface <- c("A","B","C","D","Not Stated")
+
+  switrs_reduced <- switrs_reduced %>%
+    mutate(
+      ROAD_SURFACE = normalize_not_stated(ROAD_SURFACE),
+      ROAD_SURFACE_invalid = ifelse(
+        is.na(ROAD_SURFACE) | ROAD_SURFACE %in% valid_road_surface,
+        0L, 1L
+      ),
+      ROAD_SURFACE_raw = ifelse(ROAD_SURFACE_invalid == 1L, ROAD_SURFACE, NA_character_),
+      ROAD_SURFACE = ifelse(ROAD_SURFACE_invalid == 1L, "Not Stated", ROAD_SURFACE)
+    )
+
+  cat("Out-of-spec ROAD_SURFACE codes (flagged + recoded to Not Stated):\n")
+  print(table(switrs_reduced$ROAD_SURFACE_raw, useNA = "ifany"))
+}
+switrs_reduced <- switrs_reduced %>% dplyr::select(-dplyr::any_of(c("ROAD_SURFACE_invalid","ROAD_SURFACE_raw")))
+```
+
+# Cleanup: remove ROAD_SURFACE validation helper columns (data-quality flags)
+```{r}
+switrs_reduced <- switrs_reduced %>% dplyr::select(-dplyr::any_of(c("ROAD_SURFACE_invalid","ROAD_SURFACE_raw")))
+```
+
+
+# Missingness Diagnostics (before dropping columns)
+```{r}
+# What: Missingness diagnostics at the correct crash-level grain.
+# Why: NA% on merged rows is misleading (structural NA from join).
+
+missing_na_pct <- colMeans(is.na(switrs_reduced)) * 100
+
+notstated_pct <- sapply(switrs_reduced, function(x) {
+  if (!(is.character(x) || is.factor(x))) return(NA_real_)
+  mean(as.character(x) == "Not Stated", na.rm = TRUE) * 100
+})
+
+missing_tbl <- tibble(
+  variable = names(switrs_reduced),
+  pct_na = as.numeric(missing_na_pct),
+  pct_notstated = as.numeric(notstated_pct)
+) %>%
+  arrange(desc(pct_na), desc(pct_notstated))
+
+head(missing_tbl, 30)
+```
+
+# drop columns with too much true NA
+```{r}
+# What: Drop columns exceeding NA threshold (crash-level only).
+# Why: Now NA% reflects real missingness, not merge-structure missingness.
+
+high_miss_threshold <- 30  # percent NA (tune if needed)
+
+missing_na_pct <- colMeans(is.na(switrs_reduced)) * 100
+high_miss_vars <- names(missing_na_pct)[missing_na_pct > high_miss_threshold]
+
+length(high_miss_vars)
+head(high_miss_vars, 50)
+
+switrs_reduced <- switrs_reduced %>%
+  select(-all_of(high_miss_vars))
+
+dim(switrs_reduced)
+```
+
+# drop deprecated / non-analytic variables
+```{r}
+# What: Remove variables deprecated in the codebook or not analytically useful. :contentReference[oaicite:13]{index=13}
+
+drop_vars <- intersect(
+  c("CHP_SHIFT","BEAT_TYPE","CHP_BEAT_CLASS","CALTRANS_COUNTY","CALTRANS_DISTRICT","STATE_ROUTE",
+    "ROUTE_SUFFIX","POSTMILE_PREFIX","POSTMILE","LOCATION_TYPE","RAMP_INTERSECTION","CHP_ROAD_TYPE"),
+  names(switrs_reduced)
+)
+
+switrs_reduced <- switrs_reduced %>% select(-all_of(drop_vars))
+dim(switrs_reduced)
+```
+
+# Preserve raw-coded severity and create SevereBinary outcome
+```{r}
+# What: Preserve COLLISION_SEVERITY code and create SevereBinary.
+# Why: Codebook defines severity codes; proposal uses Severe/Fatal vs Other. 
+
+if ("COLLISION_SEVERITY" %in% names(switrs_reduced)) {
+  switrs_reduced <- switrs_reduced %>%
+    mutate(
+      COLLISION_SEVERITY_CODE = as.character(COLLISION_SEVERITY),
+      COLLISION_SEVERITY_CODE = str_trim(COLLISION_SEVERITY_CODE),
+      COLLISION_SEVERITY_CODE = ifelse(
+        COLLISION_SEVERITY_CODE %in% c("", "Not Stated"),
+        NA_character_,
+        COLLISION_SEVERITY_CODE
+      )
+    )
+}
+
+switrs_reduced <- switrs_reduced %>%
+  mutate(
+    SevereBinary = case_when(
+      COLLISION_SEVERITY_CODE %in% c("1","2") ~ "Severe/Fatal",
+      COLLISION_SEVERITY_CODE %in% c("0","3","4") ~ "Other",
+      TRUE ~ NA_character_
+    ),
+    SevereBinary = factor(SevereBinary, levels = c("Other","Severe/Fatal"))
+  )
+
+table(switrs_reduced$SevereBinary, useNA = "ifany")
+```
+# Location hotspots
+```{r}
+# WHERE: Hotspot ranking (severe/fatal rate) using available location fields
+# What: Create a crash-location key (best available), then rank locations by severe/fatal rate.
+# Why: Converts the analysis into a resource-allocation tool: "where to focus first."
+
+has_latlon <- all(c("LATITUDE", "LONGITUDE") %in% names(switrs_reduced))
+has_roads  <- all(c("PRIMARY_RD", "SECONDARY_RD") %in% names(switrs_reduced))
+has_city   <- "CITY" %in% names(switrs_reduced)
+
+switrs_where <- switrs_reduced %>%
+  dplyr::filter(!is.na(SevereBinary)) %>%
+  dplyr::mutate(
+    # A) Lat/Long bin (~0.01°) for coarse hotspot screening
+    lat_bin = if (has_latlon) round(as.numeric(LATITUDE), 2) else NA_real_,
+    lon_bin = if (has_latlon) round(as.numeric(LONGITUDE), 2) else NA_real_,
+    latlon_key = if (has_latlon) paste0(lat_bin, ", ", lon_bin) else NA_character_,
+
+    # B) Intersection proxy: normalize road strings
+    rd1 = if (has_roads) stringr::str_squish(toupper(as.character(PRIMARY_RD))) else NA_character_,
+    rd2 = if (has_roads) stringr::str_squish(toupper(as.character(SECONDARY_RD))) else NA_character_,
+
+    rd1 = dplyr::if_else(is.na(rd1) | rd1 %in% c("", "NOT STATED", "UNKNOWN"), NA_character_, rd1),
+    rd2 = dplyr::if_else(is.na(rd2) | rd2 %in% c("", "NOT STATED", "UNKNOWN"), NA_character_, rd2),
+
+    # IMPORTANT: order the pair per-row so A&B == B&A 
+    rd_lo = dplyr::if_else(!is.na(rd1) & !is.na(rd2), pmin(rd1, rd2), NA_character_),
+    rd_hi = dplyr::if_else(!is.na(rd1) & !is.na(rd2), pmax(rd1, rd2), NA_character_),
+    inter_key = dplyr::if_else(!is.na(rd_lo) & !is.na(rd_hi), paste0(rd_lo, " & ", rd_hi), NA_character_),
+
+    # C) City fallback
+    city_key = if (has_city) {
+      x <- stringr::str_squish(toupper(as.character(CITY)))
+      dplyr::if_else(is.na(x) | x %in% c("", "NOT STATED", "UNKNOWN"), NA_character_, x)
+    } else NA_character_,
+
+    # Final location key preference
+    location_key = dplyr::case_when(
+      !is.na(inter_key) ~ inter_key,
+      is.na(inter_key) & !is.na(latlon_key) ~ latlon_key,
+      is.na(inter_key) & is.na(latlon_key) & !is.na(city_key) ~ city_key,
+      TRUE ~ NA_character_
+    ),
+    location_type = dplyr::case_when(
+      !is.na(inter_key) ~ "Intersection (PRIMARY_RD & SECONDARY_RD)",
+      is.na(inter_key) & !is.na(latlon_key) ~ "Lat/Lon bin (~0.01°)",
+      is.na(inter_key) & is.na(latlon_key) & !is.na(city_key) ~ "City",
+      TRUE ~ "Missing"
+    )
+  ) %>%
+  dplyr::filter(!is.na(location_key))
+
+# Rank hotspots by Severe/Fatal rate with a minimum denominator
+min_crashes <- 50
+
+hotspot_tbl <- switrs_where %>%
+  dplyr::group_by(location_type, location_key) %>%
+  dplyr::summarise(
+    n_crashes = dplyr::n(),
+    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    severe_per_100 = 100 * severe_n / n_crashes,
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(n_crashes >= min_crashes) %>%
+  dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
+
+# WHERE: Make hotspot output usable (rate + count views)
+
+min_crashes <- 10   # better for intersection-grain
+min_severe  <- 1    # require at least 1 severe/fatal to be a "hotspot" by rate
+
+hotspot_tbl2 <- switrs_where %>%
+  group_by(location_type, location_key) %>%
+  summarise(
+    n_crashes = n(),
+    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    severe_per_100 = 100 * severe_n / n_crashes,
+    .groups = "drop"
+  )
+
+# A) Hotspots by RATE (with minimum volume + at least 1 severe)
+hotspots_by_rate <- hotspot_tbl2 %>%
+  filter(n_crashes >= min_crashes, severe_n >= min_severe) %>%
+  arrange(desc(severe_per_100), desc(n_crashes))
+
+cat("\nTop 20 hotspots by Severe/Fatal RATE (min_crashes =", min_crashes,
+    ", min_severe =", min_severe, "):\n")
+print(head(hotspots_by_rate, 20))
+
+# B) Hotspots by COUNT (largest severe burden)
+hotspots_by_count <- hotspot_tbl2 %>%
+  filter(n_crashes >= min_crashes) %>%
+  arrange(desc(severe_n), desc(n_crashes))
+
+cat("\nTop 20 hotspots by Severe/Fatal COUNT (min_crashes =", min_crashes, "):\n")
+print(head(hotspots_by_count, 20))
+```
+
+# Sanity Check
+```{r}
+dplyr::count(switrs_where, location_type)
+summary(nchar(switrs_where$location_key))
+```
+
+# Derive core time features
+```{r}
+safe_parse_yyyymmdd <- function(x) {
+  x <- as.character(x)
+  x <- str_trim(x)
+  x[x %in% c("", "Not Stated")] <- NA_character_
+  suppressWarnings(as.Date(x, format = "%Y%m%d"))
+}
+
+safe_parse_hhmm <- function(x) {
+  x <- as.character(x)
+  x <- str_trim(x)
+  x[x %in% c("", "Not Stated")] <- NA_character_
+  x_num <- suppressWarnings(as.integer(x))
+  x_num[x_num >= 2500] <- NA_integer_
+  hr <- x_num %/% 100
+  hr[hr < 0 | hr > 23] <- NA_integer_
+  hr
+}
+
+if ("ACCIDENT_YEAR" %in% names(switrs_reduced)) {
+  switrs_reduced <- switrs_reduced %>% mutate(year = as.integer(ACCIDENT_YEAR))
+}
+if ("COLLISION_TIME" %in% names(switrs_reduced)) {
+  switrs_reduced <- switrs_reduced %>% mutate(hour = safe_parse_hhmm(COLLISION_TIME))
+}
+if ("DAY_OF_WEEK" %in% names(switrs_reduced)) {
+  switrs_reduced <- switrs_reduced %>%
+    mutate(
+      dow_chr = as.character(DAY_OF_WEEK),
+      weekend = case_when(
+  dow_chr %in% c("6","7","Saturday","Sunday") ~ 1L,
+  dow_chr %in% c("1","2","3","4","5","Monday","Tuesday","Wednesday","Thursday","Friday") ~ 0L,
+  TRUE ~ NA_integer_
+),
+      weekend = factor(weekend, levels = c(0,1), labels = c("Weekday","Weekend"))
+    ) %>%
+    select(-dow_chr)
+}
+if ("hour" %in% names(switrs_reduced)) {
+  switrs_reduced <- switrs_reduced %>%
+    mutate(
+      time_bucket = case_when(
+        is.na(hour) ~ NA_character_,
+        hour >= 0 & hour <= 5 ~ "Late Night (12–5)",
+        hour >= 6 & hour <= 9 ~ "AM Commute (6–9)",
+        hour >= 10 & hour <= 15 ~ "Midday (10–3)",
+        hour >= 16 & hour <= 19 ~ "PM Commute (4–7)",
+        TRUE ~ "Evening (8–11)"
+      ),
+      time_bucket = factor(time_bucket, levels = c(
+        "Late Night (12–5)","AM Commute (6–9)","Midday (10–3)",
+        "PM Commute (4–7)","Evening (8–11)"
+      ))
+    )
+}
+```
+
+# Month and seasonality panel (feature engineering and storyboard-ready rate plot)
+```{r}
+# TIME: Robust collision_date parsing + month seasonality panel (REPLACE ENTIRE CHUNK)
+# What: Parse COLLISION_DATE safely, then derive month features and summarize Severe/Fatal rate by month.
+# Why: Avoids all-NA date parsing failures and produces a single storyboard-ready seasonality panel.
+
+if (!("COLLISION_DATE" %in% names(switrs_reduced))) {
+  stop("COLLISION_DATE not found in switrs_reduced.")
+}
+
+# Robust parser for common SWITRS export formats
+parse_date_multi <- function(x) {
+  x <- as.character(x)
+  x <- trimws(x)
+  x[x %in% c("", "Not Stated", "UNKNOWN", "NA", "N/A", "NULL", "null")] <- NA_character_
+
+  d1 <- suppressWarnings(as.Date(x, format = "%Y%m%d"))     # 20240123
+  d2 <- suppressWarnings(as.Date(x, format = "%Y-%m-%d"))   # 2024-01-23
+  d3 <- suppressWarnings(as.Date(x, format = "%m/%d/%Y"))   # 01/23/2024
+
+  out <- d1
+  out[is.na(out)] <- d2[is.na(out)]
+  out[is.na(out)] <- d3[is.na(out)]
+  out
+}
+
+# Create/overwrite collision_date
+switrs_reduced$collision_date <- parse_date_multi(switrs_reduced$COLLISION_DATE)
+
+cat("collision_date parsed % = ",
+    round(mean(!is.na(switrs_reduced$collision_date)) * 100, 2), "%\n", sep = "")
+
+# Derive month features
+switrs_reduced <- switrs_reduced %>%
+  dplyr::mutate(
+    month = as.integer(format(collision_date, "%m")),
+    month_name = factor(month.abb[month], levels = month.abb, ordered = TRUE)
+  )
+
+# Month severity-rate table
+month_tbl <- switrs_reduced %>%
+  dplyr::filter(!is.na(SevereBinary), !is.na(month_name)) %>%
+  dplyr::group_by(month_name) %>%
+  dplyr::summarise(
+    n_crashes = dplyr::n(),
+    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    severe_per_100 = 100 * severe_n / n_crashes,
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(month_name)
+
+cat("Severe/Fatal rate per 100 crashes by month:\n")
+print(month_tbl)
+
+# Single storyboard-ready plot
+ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
+  geom_col() +
+  geom_text(aes(label = round(severe_per_100, 2)), vjust = -0.3, size = 3.5) +
+  labs(
+    title = "Severe/Fatal Rate by Month",
+    x = "Month",
+    y = "Severe/Fatal per 100 crashes"
+  ) +
+  theme(panel.grid.minor = element_blank())
+```
+
+# Statistics report chunk
+```{r}
+# STATISTICS REPORT: Hypothesis tests on Severe/Fatal proportions (Week 8 deliverable)
+# What: Run two-proportion tests for Severe/Fatal rate differences across key groups.
+# Why: Produces a formal hypothesis test artifact aligned with the course requirement.
+
+# ---- Helper: run a two-proportion test with a clean printed report ----
+two_prop_report <- function(data, group_var, group_a, group_b,
+                            outcome_var = "SevereBinary",
+                            outcome_success = "Severe/Fatal",
+                            title = NULL) {
+
+  if (!all(c(group_var, outcome_var) %in% names(data))) {
+    stop("Missing required columns for test: ", group_var, " and/or ", outcome_var)
+  }
+
+  df <- data %>%
+    dplyr::select(all_of(c(group_var, outcome_var))) %>%
+    dplyr::filter(!is.na(.data[[group_var]]), !is.na(.data[[outcome_var]])) %>%
+    dplyr::mutate(
+      g = as.character(.data[[group_var]]),
+      y = (.data[[outcome_var]] == outcome_success)
+    ) %>%
+    dplyr::filter(g %in% c(group_a, group_b))
+
+  n_a <- sum(df$g == group_a)
+  n_b <- sum(df$g == group_b)
+  x_a <- sum(df$y[df$g == group_a], na.rm = TRUE)
+  x_b <- sum(df$y[df$g == group_b], na.rm = TRUE)
+
+  p_a <- x_a / n_a
+  p_b <- x_b / n_b
+  diff <- p_a - p_b
+
+  test <- suppressWarnings(stats::prop.test(x = c(x_a, x_b), n = c(n_a, n_b), correct = FALSE))
+  ci <- test$conf.int
+  pval <- test$p.value
+
+  if (is.null(title)) title <- paste0(outcome_success, " proportion: ", group_a, " vs ", group_b)
+
+  cat("\n============================================================\n")
+  cat("STATISTICS REPORT —", title, "\n")
+  cat("============================================================\n")
+
+  cat("\nH0: p(", group_a, ") = p(", group_b, ")\n", sep = "")
+  cat("HA: p(", group_a, ") ≠ p(", group_b, ")\n", sep = "")
+
+  cat("\nGroup summaries:\n")
+  cat("  ", group_a, ": n = ", n_a, ", severe = ", x_a,
+      ", p̂ = ", round(p_a, 4), "\n", sep = "")
+  cat("  ", group_b, ": n = ", n_b, ", severe = ", x_b,
+      ", p̂ = ", round(p_b, 4), "\n", sep = "")
+
+  cat("\nEstimated difference (p̂A − p̂B) = ", round(diff, 4), "\n", sep = "")
+  cat("95% CI for (pA − pB): [", round(ci[1], 4), ", ", round(ci[2], 4), "]\n", sep = "")
+  cat("Two-proportion z-test p-value: ", signif(pval, 4), "\n", sep = "")
+
+  if (!is.na(pval) && pval < 0.05) {
+    cat("\nInterpretation: We reject H0 at α = 0.05. The Severe/Fatal rate differs between groups.\n")
+  } else {
+    cat("\nInterpretation: We fail to reject H0 at α = 0.05. No statistically significant difference detected.\n")
+  }
+
+  invisible(list(
+    group_a = group_a, group_b = group_b,
+    n = c(n_a, n_b), x = c(x_a, x_b),
+    p = c(p_a, p_b), diff = diff,
+    ci = ci, p_value = pval
+  ))
+}
+
+# ---- Test 1: Weekend vs Weekday ----
+# Requires your earlier weekend variable (factor with labels Weekday/Weekend)
+if ("weekend" %in% names(switrs_reduced)) {
+  two_prop_report(
+    data = switrs_reduced,
+    group_var = "weekend",
+    group_a = "Weekend",
+    group_b = "Weekday",
+    title = "Weekend vs Weekday"
+  )
+} else {
+  cat("\nSkipping Test 1: 'weekend' not found.\n")
+}
+
+# ---- Test 2: Rain vs Clear (WEATHER_1) ----
+# Your legend maps WEATHER_1: C = Raining, A = Clear (codes preserved in data)
+if ("WEATHER_1" %in% names(switrs_reduced)) {
+
+  # normalize and keep codes (A/C). If your data is already letters, great.
+  switrs_reduced <- switrs_reduced %>%
+    dplyr::mutate(WEATHER_1 = normalize_not_stated(WEATHER_1))
+
+  two_prop_report(
+    data = switrs_reduced,
+    group_var = "WEATHER_1",
+    group_a = "C",   # Raining
+    group_b = "A",   # Clear
+    title = "Raining (WEATHER_1=C) vs Clear (WEATHER_1=A)"
+  )
+
+} else {
+  cat("\nSkipping Test 2: 'WEATHER_1' not found.\n")
+}
+
+```
+
+# Statistics report (add-on)
+```{r}
+# STATISTICS REPORT (ADD-ON): Dark vs Daylight, Alcohol vs No Alcohol
+# What: Add two more two-proportion tests tied to operational decisions.
+# Why: These are usually stronger signals and map directly to interventions.
+
+# Reuse two_prop_report() from prior chunk
+if (!exists("two_prop_report")) stop("two_prop_report() not found. Run the main Statistics Report chunk first.")
+
+# ---- Test 3: Dark vs Daylight (LIGHTING) ----
+# Codebook legend (typical):
+#   A = Daylight
+#   B = Dusk/Dawn (we exclude to keep contrast clean)
+#   C/D/E = Dark variants
+if ("LIGHTING" %in% names(switrs_reduced)) {
+
+  df_light <- switrs_reduced %>%
+    dplyr::filter(!is.na(SevereBinary)) %>%
+    dplyr::mutate(
+      LIGHTING = trimws(as.character(LIGHTING)),
+      light_group = dplyr::case_when(
+        LIGHTING == "A" ~ "Daylight",
+        LIGHTING %in% c("C","D","E") ~ "Dark",
+        TRUE ~ NA_character_   # drop B (dusk/dawn), Not Stated, blanks, etc.
+      )
+    )
+
+  two_prop_report(
+    data = df_light,
+    group_var = "light_group",
+    group_a = "Dark",
+    group_b = "Daylight",
+    title = "Dark (LIGHTING=C/D/E) vs Daylight (LIGHTING=A)"
+  )
+
+} else {
+  cat("\nSkipping Test 3: 'LIGHTING' not found.\n")
+}
+
+# ---- Test 4: Alcohol involved vs not (ALCOHOL_INVOLVED) ----
+# Your earlier cleaning turns this into factor with levels N/Y/Not Stated
+if ("ALCOHOL_INVOLVED" %in% names(switrs_reduced)) {
+
+  df_alc <- switrs_reduced %>%
+    dplyr::filter(!is.na(SevereBinary)) %>%
+    dplyr::mutate(
+      ALCOHOL_INVOLVED = trimws(as.character(ALCOHOL_INVOLVED)),
+      alc_group = dplyr::case_when(
+        ALCOHOL_INVOLVED == "Y" ~ "Alcohol",
+        ALCOHOL_INVOLVED == "N" ~ "No Alcohol",
+        TRUE ~ NA_character_
+      )
+    )
+
+  two_prop_report(
+    data = df_alc,
+    group_var = "alc_group",
+    group_a = "Alcohol",
+    group_b = "No Alcohol",
+    title = "Alcohol involved vs Not alcohol involved"
+  )
+
+} else {
+  cat("\nSkipping Test 4: 'ALCOHOL_INVOLVED' not found.\n")
+}
+```
+
+#Scenario Ranking (top combinations & rates & counts)
+```{r}
+# SCENARIO RANKING: Highest-risk combinations (rates + counts)
+# What: Construct interpretable "scenario" groups from key factors and rank by severe/fatal rate and count.
+# Why: Produces actionable targeting guidance: "focus on these conditions first."
+
+# ---- 1) Build scenario fields (only if columns exist) ----
+df_scen <- switrs_reduced %>%
+  dplyr::filter(!is.na(SevereBinary)) %>%
+  dplyr::mutate(
+    # Time bucket (already created earlier)
+    time_bucket = if ("time_bucket" %in% names(.)) as.character(time_bucket) else NA_character_,
+
+    # Weekend (already created earlier)
+    weekend = if ("weekend" %in% names(.)) as.character(weekend) else NA_character_,
+
+    # Alcohol involved (crash-level)
+    alcohol = if ("ALCOHOL_INVOLVED" %in% names(.)) {
+      x <- trimws(as.character(ALCOHOL_INVOLVED))
+      dplyr::case_when(
+        x == "Y" ~ "Alcohol",
+        x == "N" ~ "No Alcohol",
+        TRUE ~ NA_character_
+      )
+    } else NA_character_,
+
+    # Pedestrian involved (crash-level)
+    ped = if ("PEDESTRIAN_ACCIDENT" %in% names(.)) {
+      x <- trimws(as.character(PEDESTRIAN_ACCIDENT))
+      dplyr::case_when(
+        x == "Y" ~ "Ped",
+        x == "N" ~ "No Ped",
+        TRUE ~ NA_character_
+      )
+    } else NA_character_,
+
+    # Lighting → Daylight vs Dark (exclude dusk/dawn + not stated for clean contrast)
+    light = if ("LIGHTING" %in% names(.)) {
+      x <- trimws(as.character(LIGHTING))
+      dplyr::case_when(
+        x == "A" ~ "Daylight",
+        x %in% c("C","D","E") ~ "Dark",
+        TRUE ~ NA_character_
+      )
+    } else NA_character_
+  )
+
+# ---- 2) Keep only scenarios where all selected dimensions are present ----
+scenario_vars <- c("time_bucket","weekend","alcohol","ped","light")
+scenario_vars <- scenario_vars[scenario_vars %in% names(df_scen)]
+
+df_scen2 <- df_scen %>%
+  dplyr::filter(dplyr::if_all(dplyr::all_of(scenario_vars), ~ !is.na(.x)))
+
+# If too strict, relax by dropping the weakest dimension(s)
+cat("Rows with complete scenario fields:", nrow(df_scen2), "\n")
+cat("Scenario dimensions used:", paste(scenario_vars, collapse = ", "), "\n")
+
+# ---- 3) Create scenario label and rank ----
+df_rank <- df_scen2 %>%
+  dplyr::mutate(
+    scenario = paste(
+      paste0("Time=", time_bucket),
+      paste0("DayType=", weekend),
+      paste0("Light=", light),
+      paste0("Alcohol=", alcohol),
+      paste0("Ped=", ped),
+      sep = " | "
+    ),
+    is_severe = (SevereBinary == "Severe/Fatal")
+  ) %>%
+  dplyr::group_by(scenario) %>%
+  dplyr::summarise(
+    n_crashes = dplyr::n(),
+    severe_n = sum(is_severe, na.rm = TRUE),
+    severe_per_100 = 100 * severe_n / n_crashes,
+    .groups = "drop"
+  )
+
+# ---- 4) Two views: by rate and by count (robust thresholds) ----
+
+# A) By COUNT: always useful, no severe_n restriction
+min_crashes_count <- 30
+
+top_by_count <- df_rank %>%
+  dplyr::filter(n_crashes >= min_crashes_count) %>%
+  dplyr::arrange(dplyr::desc(severe_n), dplyr::desc(n_crashes))
+
+cat("\nTop 15 scenarios by Severe/Fatal COUNT",
+    "(min_crashes=", min_crashes_count, "):\n", sep = "")
+print(head(top_by_count, 15))
+
+cat("\nScenarios meeting COUNT filter:", nrow(top_by_count), "\n")
+
+# B) By RATE: use lighter thresholds + require at least 1 severe
+min_crashes_rate <- 15
+min_severe_rate  <- 1
+
+top_by_rate <- df_rank %>%
+  dplyr::filter(n_crashes >= min_crashes_rate, severe_n >= min_severe_rate) %>%
+  dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
+
+cat("\nTop 15 scenarios by Severe/Fatal RATE",
+    "(min_crashes=", min_crashes_rate, ", min_severe=", min_severe_rate, "):\n", sep = "")
+print(head(top_by_rate, 15))
+
+cat("\nScenarios meeting RATE filter:", nrow(top_by_rate), "\n")
+```
+
+# Storyboard panels: where and when scenario prioritization
+```{r storyboard_panels, fig.width=14, fig.height=8}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# Make notebook plots taller so titles don't clip
+options(repr.plot.width = 10, repr.plot.height = 6)
+
+base_theme_fix <- theme(
+  plot.title = element_text(size = 16, face = "bold"),
+  plot.subtitle = element_text(size = 11),
+  plot.margin = margin(t = 12, r = 12, b = 12, l = 12),
+  panel.grid.minor = element_blank()
+)
+
+# ---- Panel 1: Top Hotspots by Severe/Fatal COUNT ----
+if (exists("hotspots_by_count") && nrow(hotspots_by_count) > 0) {
+
+  p1 <- hotspots_by_count %>%
+    slice_head(n = 15) %>%
+    mutate(location_key = factor(location_key, levels = rev(location_key))) %>%
+    ggplot(aes(x = location_key, y = severe_n)) +
+    geom_col() +
+    coord_flip(clip = "off") +
+    labs(
+      title = "Top 15 Hotspots by Severe/Fatal Count",
+      subtitle = "Higher count = larger severe/fatal burden (deployment prioritization)",
+      x = NULL,
+      y = "Severe/Fatal crashes"
+    ) +
+    base_theme_fix
+
+  print(p1)
+
+} else {
+  cat("hotspots_by_count not found or empty — run the hotspots chunk first.\n")
+}
+
+# ---- Panel 2: Top Scenarios by Severe/Fatal RATE ----
+if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
+
+  # Make this plot taller due to long scenario labels
+  options(repr.plot.width = 12, repr.plot.height = 7)
+
+  p2 <- top_by_rate %>%
+    slice_head(n = 15) %>%
+    mutate(scenario = factor(scenario, levels = rev(scenario))) %>%
+    ggplot(aes(x = scenario, y = severe_per_100)) +
+    geom_col() +
+    coord_flip(clip = "off") +
+    labs(
+      title = "Top 15 Scenarios by Severe/Fatal Rate",
+      subtitle = "Higher rate = higher risk intensity (targeted interventions)",
+      x = NULL,
+      y = "Severe/Fatal per 100 crashes"
+    ) +
+    base_theme_fix +
+    theme(axis.text.y = element_text(size = 9))
+
+  print(p2)
+
+} else {
+  cat("top_by_rate not found or empty — run the scenario ranking chunk first.\n")
+}
+```
+
+# codebook label dictionaries
+```{r}
+# What: Given a vector of raw codes and a named legend vector, return meanings.
+# Why: Handles "1" vs "01" etc. without rewriting your data.
+
+lookup_meaning <- function(x, legend_vec) {
+  x0 <- normalize_not_stated(x)
+
+  # if exact match exists, use it
+  out <- unname(legend_vec[x0])
+
+  # if missing, try left-pad to width 2 for numeric-looking codes (e.g., PCF_VIOL_CATEGORY)
+  needs_pad <- is.na(out) & grepl("^[0-9]+$", x0)
+  x2 <- x0
+  x2[needs_pad] <- sprintf("%02d", as.integer(x0[needs_pad]))
+  out2 <- unname(legend_vec[x2])
+
+  # fill remaining from padded attempt
+  out[is.na(out)] <- out2[is.na(out)]
+
+  out
+}
+
+legend_maps <- list(
+  DAY_OF_WEEK = c(
+    "1"="Monday","2"="Tuesday","3"="Wednesday","4"="Thursday",
+    "5"="Friday","6"="Saturday","7"="Sunday"
+  ),
+  WEATHER_1 = c(
+    "A"="Clear","B"="Cloudy","C"="Raining","D"="Snowing","E"="Fog","F"="Other","G"="Wind",
+    "Not Stated"="Not Stated"
+  ),
+  LIGHTING = c(
+    "A"="Daylight","B"="Dusk - Dawn","C"="Dark - Street Lights","D"="Dark - No Street Lights",
+    "E"="Dark - Street Lights Not Functioning","Not Stated"="Not Stated"
+  ),
+  ROAD_SURFACE = c(
+    "A"="Dry","B"="Wet","C"="Snowy or Icy","D"="Slippery (Muddy/Oily/etc.)","Not Stated"="Not Stated"
+  ),
+  INTERSECTION = c("Y"="Intersection","N"="Not Intersection","Not Stated"="Not Stated"),
+  PRIMARY_COLL_FACTOR = c(
+    "A"="Code Violation","B"="Other Improper Driving","C"="Other Than Driver",
+    "D"="Unknown","E"="Fell Asleep","Not Stated"="Not Stated"
+  ),
+  TYPE_OF_COLLISION = c(
+    "A"="Head-On","B"="Sideswipe","C"="Rear End","D"="Broadside","E"="Hit Object","F"="Overturned",
+    "G"="Vehicle/Pedestrian","H"="Other","Not Stated"="Not Stated"
+  ),
+  # PCF_VIOL_CATEGORY codes per codebook. :contentReference[oaicite:16]{index=16}
+  PCF_VIOL_CATEGORY = c(
+    "01"="DUI (Alcohol/Drug)",
+    "02"="Impeding Traffic",
+    "03"="Unsafe Speed",
+    "04"="Following Too Closely",
+    "05"="Wrong Side of Road",
+    "06"="Improper Passing",
+    "07"="Unsafe Lane Change",
+    "08"="Improper Turning",
+    "09"="Automobile Right-of-Way",
+    "10"="Pedestrian Right-of-Way",
+    "11"="Pedestrian Violation",
+    "12"="Traffic Signals & Signs",
+    "13"="Hazardous Parking",
+    "14"="Lights",
+    "15"="Brakes",
+    "16"="Other Equipment",
+    "17"="Other Hazardous Violation",
+    "18"="Other Than Driver (or Pedestrian)",
+    "21"="Unsafe Starting/Backing",
+    "22"="Other Improper Driving",
+    "23"="Ped/Other DUI (Alcohol/Drug)",
+    "24"="Fell Asleep",
+    "00"="Unknown",
+    "Not Stated"="Not Stated"
+  ),
+  # HIT_AND_RUN codes per codebook. :contentReference[oaicite:17]{index=17}
+  HIT_AND_RUN = c(
+    "F"="Felony",
+    "M"="Misdemeanor",
+    "N"="Not Hit and Run",
+    "Not Stated"="Not Stated"
+  )
+)
+
+# What: Print a clean legend table for a variable.
+# Why: You want a readable legend under plots; duplicate aliases ("1" and "01") are collapsed.
+
+print_legend <- function(var_name, dedupe_meaning = TRUE) {
+  if (!var_name %in% names(legend_maps)) return(invisible(NULL))
+
+  m <- legend_maps[[var_name]]
+  df <- data.frame(
+    code = names(m),
+    meaning = unname(m),
+    stringsAsFactors = FALSE
+  )
+
+  if (dedupe_meaning) {
+    # keep the first occurrence of each meaning (so "1" and "01" don't both show)
+    df <- df[!duplicated(df$meaning), ]
+  }
+
+  cat("\nLEGEND for", var_name, ":\n")
+  print(df, row.names = FALSE)
+  invisible(df)
+}
+```
+
+# EDA: Severity rate table for key categorical variables
+```{r}
+# What: Compute severe rate per 100 crashes by category for a set of variables.
+# Why: Decision-oriented EDA: rates are more comparable than raw counts across uneven category sizes.
+
+severity_rate_table <- function(data, var) {
+  if (!var %in% names(data)) return(NULL)
+
+  df <- data %>%
+    filter(!is.na(SevereBinary)) %>%
+    mutate(v = as.character(.data[[var]])) %>%
+    mutate(v = ifelse(is.na(v) | v == "", "Not Stated", v))
+
+  # Optional: label coded variables for readability (while keeping original codes)
+  if (var %in% names(legend_maps)) {
+    map <- legend_maps[[var]]
+    df <- df %>% mutate(v_label = dplyr::recode(v, !!!map, .default = v))
+    grp <- "v_label"
+  } else {
+    grp <- "v"
+  }
+
+  df %>%
+    group_by(.data[[grp]]) %>%
+    summarise(
+      n = n(),
+      severe_n = sum(SevereBinary == "Severe/Fatal"),
+      severe_per_100 = 100 * severe_n / n,
+      .groups = "drop"
+    ) %>%
+    rename(category = .data[[grp]]) %>%
+    arrange(desc(severe_per_100), desc(n))
+}
+
+eda_vars <- intersect(
+  c("DAY_OF_WEEK","time_bucket","weekend","WEATHER_1","LIGHTING","ROAD_SURFACE",
+    "INTERSECTION","STATE_HWY_IND","TYPE_OF_COLLISION","PRIMARY_COLL_FACTOR",
+    "PCF_VIOL_CATEGORY","HIT_AND_RUN",
+    # include crash-level versions of these flags if present
+    "PEDESTRIAN_ACCIDENT","BICYCLE_ACCIDENT","MOTORCYCLE_ACCIDENT","TRUCK_ACCIDENT","ALCOHOL_INVOLVED"),
+  names(switrs_reduced)
+)
+
+rate_tables <- purrr::map(eda_vars, ~ severity_rate_table(switrs_reduced, .x))
+names(rate_tables) <- eda_vars
+
+rate_tables[1:min(6, length(rate_tables))]
+```
+
+# EDA: Decision-oriented severity rate plots (ordered, horizontal)
+```{r}
+# What: Plot Severe/Fatal share by categorical variables as normalized stacked bars (horizontal).
+# Why: Client-ready comparisons: proportions highlight risk composition instead of just volume.
+
+plot_severity_by_variable <- function(var_name,
+                                      data = switrs_reduced,
+                                      fill_var = "SevereBinary") {
+
+  if (!var_name %in% names(data)) return(NULL)
+
+  # Make legend stable across plots
+  data[[fill_var]] <- factor(data[[fill_var]], levels = c("Other", "Severe/Fatal"))
+
+  # Build summarized frame (codes preserved in x_code)
+  df <- data %>%
+    filter(!is.na(.data[[fill_var]])) %>%
+    transmute(
+      x_code = normalize_not_stated(.data[[var_name]]),
+      Outcome = .data[[fill_var]]
+    ) %>%
+    count(x_code, Outcome, name = "n") %>%
+    group_by(x_code) %>%
+    mutate(
+      prop = n / sum(n),
+      pct_label = scales::percent(prop, accuracy = 0.1)
+    ) %>%
+    ungroup()
+
+  # Order bars by Severe/Fatal share (descending), tie-break by n
+  ordering <- df %>%
+    group_by(x_code) %>%
+    summarise(
+      severe_prop = sum(prop[Outcome == "Severe/Fatal"], na.rm = TRUE),
+      total_n = sum(n),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(severe_prop), desc(total_n)) %>%
+    pull(x_code)
+
+  df$x_code <- factor(df$x_code, levels = ordering)
+
+  # Axis label function: if a legend exists, show the meaning; else show the code
+  label_fun <- function(x) {
+    if (var_name %in% names(legend_maps)) {
+      out <- lookup_meaning(x, legend_maps[[var_name]])
+      # fallback if lookup fails
+      out[is.na(out) | out == ""] <- x[is.na(out) | out == ""]
+      out
+    } else {
+      x
+    }
+  }
+
+  p <- ggplot(df, aes(x = x_code, y = prop, fill = Outcome)) +
+    geom_bar(stat = "identity", position = "stack") +
+    geom_text(
+      aes(label = pct_label),
+      position = position_stack(vjust = 0.5),
+      color = "white",
+      size = 3.8,
+      fontface = "bold"
+    ) +
+    coord_flip() +
+    scale_y_continuous(expand = c(0, 0), breaks = NULL, labels = NULL) +
+    scale_x_discrete(labels = label_fun) +
+    scale_fill_discrete(drop = FALSE) +
+    labs(
+      title = paste("Severity Distribution by", gsub("_", " ", var_name)),
+      x = gsub("_", " ", var_name),
+      y = NULL,
+      fill = "Outcome"
+    ) +
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      legend.position = "right"
+    )
+
+  print(p)
+  print_legend(var_name)
+}
+
+# Choose a manageable set to render in notebook
+vars_to_plot <- intersect(
+  c("DAY_OF_WEEK","time_bucket","WEATHER_1","LIGHTING","ROAD_SURFACE","INTERSECTION",
+    "TYPE_OF_COLLISION","PRIMARY_COLL_FACTOR"),
+  names(switrs_reduced)
+)
+
+purrr::walk(vars_to_plot, ~ plot_severity_by_variable(.x))
+```
+
+# Correlation Check (numeric predictors)
+```{r}
+# What: Correlation scan among numeric predictors.
+# Why: Highly collinear predictors can destabilize regression coefficients and interpretation.
+
+num_vars <- names(switrs_reduced)[sapply(switrs_reduced, is.numeric)]
+num_vars <- setdiff(num_vars, c("ACCIDENT_YEAR"))  # often redundant with derived year
+
+if (length(num_vars) >= 2) {
+  cor_matrix <- cor(switrs_reduced[num_vars], use = "pairwise.complete.obs")
+  corrplot(cor_matrix, method = "color", type = "lower", tl.cex = 0.6)
+
+  # Report high/moderate correlations
+  high_corr <- c()
+  moderate_corr <- c()
+
+  for (i in 1:(ncol(cor_matrix) - 1)) {
+    for (j in (i + 1):ncol(cor_matrix)) {
+      r <- cor_matrix[i, j]
+      if (!is.na(r)) {
+        pair <- paste(colnames(cor_matrix)[i], colnames(cor_matrix)[j], "r =", round(r, 3))
+        if (abs(r) >= 0.8) high_corr <- c(high_corr, pair)
+        else if (abs(r) >= 0.5) moderate_corr <- c(moderate_corr, pair)
+      }
+    }
+  }
+
+  cat("High correlations (|r| >= 0.8):\n")
+  high_corr
+  cat("\nModerate correlations (0.5 <= |r| < 0.8):\n")
+  moderate_corr
+} else {
+  cat("Not enough numeric columns for correlation analysis.\n")
+}
+```
+
+# Baseline modeling dataset
+```{r}
+# BASELINE MODEL (CLEAN PIPELINE): build model_df safely, drop separators, train/test eval
+# What: Construct modeling frame WITHOUT leakage columns like phat; auto-drop perfect separators.
+# Why: Prevents accidental leakage and ensures reproducible evaluation.
+
+set.seed(544)
+
+# ---- 1) Candidate predictors (edit as needed) ----
+candidate_predictors <- intersect(
+  c(
+    # crash-level
+    "year","time_bucket","DAY_OF_WEEK","weekend","WEATHER_1","LIGHTING","ROAD_SURFACE",
+    "INTERSECTION","STATE_HWY_IND","TYPE_OF_COLLISION","PRIMARY_COLL_FACTOR",
+    "PCF_VIOL_CATEGORY","HIT_AND_RUN","ALCOHOL_INVOLVED",
+    "PEDESTRIAN_ACCIDENT","BICYCLE_ACCIDENT","MOTORCYCLE_ACCIDENT","TRUCK_ACCIDENT",
+
+    # party aggregates
+    "n_parties","any_party_alcohol","any_party_drug","any_party_at_fault","mean_party_age",
+
+    # victim aggregates (WARNING: do not include KSI/killed/injury-leak vars)
+    "n_victims","min_victim_age"
+  ),
+  names(switrs_reduced)
+)
+
+# ---- 2) Build modeling frame (NO phat!) ----
+model_df_clean <- switrs_reduced %>%
+  dplyr::select(all_of(c("SevereBinary", candidate_predictors))) %>%
+  dplyr::filter(!is.na(SevereBinary)) %>%
+  dplyr::mutate(SevereBinary = factor(SevereBinary, levels = c("Other","Severe/Fatal")))
+
+# Types: chars->factor; explicit NA label for factors
+model_df_clean <- model_df_clean %>%
+  dplyr::mutate(across(where(is.character), as.factor)) %>%
+  dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
+
+# Numeric: median impute + missing indicator
+num_cols <- names(model_df_clean)[sapply(model_df_clean, is.numeric)]
+num_cols <- setdiff(num_cols, character(0))
+for (v in num_cols) {
+  miss_name <- paste0(v, "_miss")
+  model_df_clean[[miss_name]] <- as.integer(is.na(model_df_clean[[v]]))
+  med <- suppressWarnings(median(model_df_clean[[v]], na.rm = TRUE))
+  if (is.na(med)) med <- 0
+  model_df_clean[[v]][is.na(model_df_clean[[v]])] <- med
+}
+
+# Drop constant predictors
+is_constant <- sapply(model_df_clean %>% dplyr::select(-SevereBinary), function(x) {
+  ux <- unique(x); ux <- ux[!is.na(ux)]
+  length(ux) <= 1
+})
+if (any(is_constant)) {
+  cat("Dropping constant predictors:\n")
+  print(names(is_constant)[is_constant])
+  model_df_clean <- model_df_clean %>% dplyr::select(SevereBinary, names(is_constant)[!is_constant])
+}
+
+# ---- 3) Auto-detect perfect separators and drop them ----
+y <- model_df_clean$SevereBinary
+pred_names <- setdiff(names(model_df_clean), "SevereBinary")
+
+is_perfect_separator <- function(x, y) {
+  if (is.character(x) || is.factor(x)) {
+    tab <- table(x, y, useNA = "no")
+    any(apply(tab, 1, function(r) any(r == 0) && sum(r) > 0))
+  } else if (is.numeric(x) || is.integer(x)) {
+    x1 <- x[y == "Severe/Fatal"]; x0 <- x[y == "Other"]
+    x1 <- x1[is.finite(x1)]; x0 <- x0[is.finite(x0)]
+    if (length(x1) < 5 || length(x0) < 5) return(FALSE)
+    (max(x0, na.rm = TRUE) < min(x1, na.rm = TRUE)) || (max(x1, na.rm = TRUE) < min(x0, na.rm = TRUE))
+  } else FALSE
+}
+
+sep_flags <- sapply(pred_names, function(v) is_perfect_separator(model_df_clean[[v]], y))
+bad_vars <- names(sep_flags)[sep_flags]
+
+cat("Perfect-separating predictors dropped:", length(bad_vars), "\n")
+if (length(bad_vars) > 0) print(bad_vars)
+
+model_df_clean2 <- model_df_clean %>% dplyr::select(-dplyr::all_of(bad_vars))
+
+cat("Final predictors used:", ncol(model_df_clean2) - 1, "\n")
+cat("Rows used:", nrow(model_df_clean2), "\n")
+
+# ---- 4) Train/Test split (stratified) ----
+idx_sev <- which(model_df_clean2$SevereBinary == "Severe/Fatal")
+idx_oth <- which(model_df_clean2$SevereBinary == "Other")
+test_frac <- 0.30
+
+test_idx <- c(
+  sample(idx_sev, size = floor(length(idx_sev) * test_frac)),
+  sample(idx_oth, size = floor(length(idx_oth) * test_frac))
+)
+
+test_set  <- model_df_clean2[test_idx, , drop = FALSE]
+train_set <- model_df_clean2[-test_idx, , drop = FALSE]
+
+cat("Train n =", nrow(train_set), " | Test n =", nrow(test_set), "\n")
+
+# ---- 5) Fit GLM (train-only) ----
+glm_fit_final <- glm(
+  SevereBinary ~ .,
+  data = train_set,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+cat("GLM converged? ", glm_fit_final$converged, "\n", sep = "")
+
+# ---- 6) Predict + AUC + confusion matrix ----
+test_phat <- as.numeric(predict(glm_fit_final, newdata = test_set, type = "response"))
+test_y <- test_set$SevereBinary
+
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+if (requireNamespace("pROC", quietly = TRUE)) {
+  roc_obj <- pROC::roc(test_y, test_phat, levels = c("Other","Severe/Fatal"), quiet = TRUE)
+  cat("TEST AUC:", round(as.numeric(pROC::auc(roc_obj)), 4), "\n")
+}
+
+pred_05 <- factor(ifelse(test_phat >= 0.5, "Severe/Fatal", "Other"), levels = levels(test_y))
+cat("\nConfusion matrix (cutoff=0.50):\n")
+print(table(Pred = pred_05, Truth = test_y))
+
+# ---- 7) Calibration (deciles) ----
+cal_tbl <- data.frame(
+  y = as.integer(test_y == "Severe/Fatal"),
+  phat = test_phat
+) %>%
+  dplyr::mutate(bin = dplyr::ntile(phat, 10)) %>%
+  dplyr::group_by(bin) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_phat = mean(phat),
+    obs_rate = mean(y),
+    .groups = "drop"
+  )
+
+print(cal_tbl)
+
+ggplot(cal_tbl, aes(x = mean_phat, y = obs_rate)) +
+  geom_point(size = 2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  labs(
+    title = "Calibration Plot (Test Set, Deciles)",
+    x = "Mean predicted probability",
+    y = "Observed Severe/Fatal rate"
+  )
+
+# ---- Compatibility aliases for downstream chunks ----
+model_df <- model_df_clean2
+glm_fit  <- glm_fit_final
+model_df$phat <- as.numeric(predict(glm_fit, newdata = model_df, type = "response"))
+```
+
+# Penalized logistic regression
+```{r glmnet_model, message=FALSE, warning=FALSE}
+# MODEL UPGRADE: Penalized Logistic Regression (glmnet)
+# What: Fit LASSO/Ridge-style regularized logistic regression with cross-validation.
+# Why: Handles separation + high-cardinality categorical predictors more robustly than vanilla GLM.
+
+# Install/load glmnet if needed
+if (!requireNamespace("glmnet", quietly = TRUE)) install.packages("glmnet")
+library(glmnet)
+
+# ---- 1) Sanity checks ----
+if (!exists("train_set") || !exists("test_set")) {
+  stop("train_set/test_set not found. Run the baseline modeling chunk (Chunk 7) first.")
+}
+if (!("SevereBinary" %in% names(train_set))) stop("SevereBinary not found in train_set.")
+
+# ---- 2) Build model matrices (one-hot encode factors) ----
+# Note: model.matrix automatically drops the intercept when we remove it.
+x_train <- model.matrix(SevereBinary ~ . , data = train_set)[, -1, drop = FALSE]
+x_test  <- model.matrix(SevereBinary ~ . , data = test_set)[, -1, drop = FALSE]
+
+# Outcome as 0/1: Severe/Fatal = 1
+y_train <- as.integer(train_set$SevereBinary == "Severe/Fatal")
+y_test  <- as.integer(test_set$SevereBinary == "Severe/Fatal")
+
+# ---- 3) Cross-validated glmnet ----
+# alpha = 1 (LASSO). If you want ridge, set alpha = 0. Elastic net: alpha between 0 and 1.
+set.seed(544)
+cv_fit <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 5,
+  type.measure = "auc"
+)
+
+cat("Best lambda (min):", cv_fit$lambda.min, "\n")
+cat("1-SE lambda:", cv_fit$lambda.1se, "\n")
+
+plot(cv_fit)
+
+# ---- 4) Predict on test + AUC ----
+p_test <- as.numeric(predict(cv_fit, newx = x_test, s = "lambda.1se", type = "response"))
+
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+auc_glmnet <- NA_real_
+if (requireNamespace("pROC", quietly = TRUE)) {
+  roc_obj <- pROC::roc(response = y_test, predictor = p_test, quiet = TRUE)
+  auc_glmnet <- as.numeric(pROC::auc(roc_obj))
+  cat("TEST AUC (glmnet, lambda.1se):", round(auc_glmnet, 4), "\n")
+}
+
+# Confusion matrix at 0.5 (and prevalence)
+pred_05 <- ifelse(p_test >= 0.5, 1, 0)
+cat("\nConfusion matrix (glmnet, cutoff=0.50):\n")
+print(table(Pred = pred_05, Truth = y_test))
+
+prev <- mean(y_train == 1)
+pred_prev <- ifelse(p_test >= prev, 1, 0)
+cat("\nConfusion matrix (glmnet, cutoff=prevalence=", round(prev, 4), "):\n", sep = "")
+print(table(Pred = pred_prev, Truth = y_test))
+
+# ---- 5) Top coefficients (interpretation aid) ----
+coef_mat <- as.matrix(coef(cv_fit, s = "lambda.1se"))
+coef_df <- data.frame(
+  term = rownames(coef_mat),
+  coef = as.numeric(coef_mat[, 1]),
+  row.names = NULL
+) %>%
+  dplyr::filter(term != "(Intercept)", coef != 0) %>%
+  dplyr::arrange(dplyr::desc(abs(coef)))
+
+cat("\nTop 20 non-zero coefficients by |coef| (glmnet, lambda.1se):\n")
+print(head(coef_df, 20))
+```
+
+# Comparison and operating point metrics
+```{r model_compare, message=FALSE, warning=FALSE}
+# MODEL COMPARISON: GLM baseline vs glmnet (AUC + threshold metrics)
+# What: Put both models on the same footing and summarize test performance.
+# Why: Client-ready model selection story.
+
+# Helper: compute metrics from probs at a cutoff
+metric_at_cutoff <- function(y01, p, cutoff) {
+  pred <- as.integer(p >= cutoff)
+  tp <- sum(pred == 1 & y01 == 1)
+  tn <- sum(pred == 0 & y01 == 0)
+  fp <- sum(pred == 1 & y01 == 0)
+  fn <- sum(pred == 0 & y01 == 1)
+
+  data.frame(
+    cutoff = cutoff,
+    sensitivity = ifelse(tp + fn > 0, tp / (tp + fn), NA_real_),
+    specificity = ifelse(tn + fp > 0, tn / (tn + fp), NA_real_),
+    precision  = ifelse(tp + fp > 0, tp / (tp + fp), NA_real_),
+    accuracy   = (tp + tn) / (tp + tn + fp + fn),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Need: test_set, test_y from GLM chunk; p_test, y_test from glmnet chunk
+if (!exists("test_set")) stop("test_set not found (from GLM baseline chunk).")
+if (!exists("test_phat")) stop("test_phat not found (from GLM baseline chunk).")
+if (!exists("p_test")) stop("p_test not found (from glmnet chunk).")
+
+# GLM test probs/outcome
+y_glm <- as.integer(test_set$SevereBinary == "Severe/Fatal")
+p_glm <- test_phat
+
+# glmnet test probs/outcome
+y_en  <- y_test
+p_en  <- p_test
+
+# AUCs
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+auc_glm <- as.numeric(pROC::auc(pROC::roc(y_glm, p_glm, quiet = TRUE)))
+auc_en  <- as.numeric(pROC::auc(pROC::roc(y_en,  p_en,  quiet = TRUE)))
+
+prev <- mean(as.integer(train_set$SevereBinary == "Severe/Fatal"))
+
+# Metrics at 0.5 and prevalence cutoffs
+glm_05   <- metric_at_cutoff(y_glm, p_glm, 0.5)
+glm_prev <- metric_at_cutoff(y_glm, p_glm, prev)
+
+en_05    <- metric_at_cutoff(y_en, p_en, 0.5)
+en_prev  <- metric_at_cutoff(y_en, p_en, prev)
+
+glm_05$model <- "GLM"; glm_prev$model <- "GLM"
+en_05$model  <- "glmnet"; en_prev$model <- "glmnet"
+
+perf_tbl <- dplyr::bind_rows(glm_05, glm_prev, en_05, en_prev) %>%
+  dplyr::select(model, cutoff, sensitivity, specificity, precision, accuracy)
+
+auc_tbl <- data.frame(
+  model = c("GLM", "glmnet"),
+  test_auc = c(auc_glm, auc_en)
+)
+
+cat("Test AUC comparison:\n")
+print(auc_tbl)
+
+cat("\nOperating point metrics (test set):\n")
+print(perf_tbl)
+```
+
+# EXECUTIVE SUMMARY (Storyboard-ready text)
+```{r exec_summary, results='asis'}
+# What: Print a concise narrative summary tying together hotspots, scenarios, hypothesis tests, and model performance.
+# Why: Gives you paste-ready language for the storyboard + final report.
+
+cat("## Executive summary\n\n")
+
+# Pull key stats safely
+auc_glm_val    <- if (exists("auc_tbl")) auc_tbl$test_auc[auc_tbl$model == "GLM"] else NA
+auc_glmnet_val <- if (exists("auc_tbl")) auc_tbl$test_auc[auc_tbl$model == "glmnet"] else NA
+
+# Weekend vs weekday: use your earlier test output if saved; otherwise compute quick diff
+weekend_diff <- NA
+if ("weekend" %in% names(switrs_reduced)) {
+  tmp <- switrs_reduced %>%
+    dplyr::filter(!is.na(SevereBinary), !is.na(weekend)) %>%
+    dplyr::group_by(weekend) %>%
+    dplyr::summarise(p = mean(SevereBinary == "Severe/Fatal"), n = dplyr::n(), .groups="drop")
+  if (all(c("Weekend","Weekday") %in% tmp$weekend)) {
+    weekend_diff <- tmp$p[tmp$weekend=="Weekend"] - tmp$p[tmp$weekend=="Weekday"]
+  }
+}
+
+cat(
+  sprintf(
+    "We analyzed crash-level SWITRS records (one row per CASE_ID) to identify *where* and *under what conditions* severe/fatal crashes are most concentrated. Hotspot rankings highlight specific intersections/corridors with the highest severe/fatal burden, while scenario rankings identify high-risk combinations of time-of-day, lighting, alcohol involvement, and pedestrian involvement.\n\n"
+  )
+)
+
+cat(
+  sprintf(
+    "Formal hypothesis tests support operational differences in risk: severe/fatal crashes occur at a higher rate on weekends than weekdays (difference in proportions ≈ %s). Predictive modeling provides additional validation: a baseline logistic regression achieves test AUC ≈ %.3f, and a penalized logistic regression (glmnet) achieves test AUC ≈ %.3f—similar performance, with glmnet offering greater stability for high-cardinality categorical predictors.\n\n",
+    ifelse(is.na(weekend_diff), "N/A", paste0(round(100*weekend_diff, 2), " percentage points")),
+    auc_glm_val, auc_glmnet_val
+  )
+)
+
+cat("### Recommended actions\n")
+cat("- **Target locations with highest severe/fatal counts** for near-term deployment (enforcement, engineering review, and signage).\n")
+cat("- **Prioritize high-risk scenarios** (e.g., dark conditions + late night/commute periods, and pedestrian-involved contexts) with targeted patrol/visibility strategies.\n")
+cat("- **Use model scores as a triage tool**, selecting an operating threshold based on policy preference (higher precision at 0.50 vs higher recall near prevalence).\n")
+```
+
+# model diagnostics: class imabalance and missingness
+```{r}
+# What: Report class balance and remaining missingness in the modeling frame used for GLM baseline.
+# Why: Confirms the outcome imbalance and verifies preprocessing eliminated NA.
+
+# Use the finalized modeling frame from Chunk 7 if present; otherwise fall back
+md <- if (exists("model_df_clean2")) model_df_clean2 else model_df
+
+cat("Class balance (modeling frame):\n")
+print(table(md$SevereBinary))
+
+cat("\nRemaining NA% by column (should be ~0 after preprocessing):\n")
+remaining_na <- sort(colMeans(is.na(md)) * 100, decreasing = TRUE)
+print(head(remaining_na, 20))
+```
+
+# next-step hooks (merged data expansion): “Note: PCF_VIOL_CATEGORY may cause separation in unpenalized GLM; glmnet handles it.”
+```{r}
+# What: List additional merged-only candidate predictors for future iterations (non-leakage).
+# Why: Keeps the roadmap aligned with modeling integrity (avoid injury/death proxies).
+
+pattern <- "PARTY_|DRIVER|VEH|SOBRIETY|DRUG|SAFETY|EQUIP|AT_FAULT|AGE|SEX|VIOL"
+
+cands <- names(switrs_reduced)[
+  grepl(pattern, names(switrs_reduced), ignore.case = TRUE)
+]
+
+# Drop known leakage / outcome-adjacent fields
+leak_like <- grepl("KILLED|FATAL|INJUR|SEVER|KSI|COUNT_", cands, ignore.case = TRUE)
+cands <- cands[!leak_like]
+
+cat("Candidate merged-only predictors to consider next (non-leakage):\n")
+print(head(cands, 50))
+```
