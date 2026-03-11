@@ -260,7 +260,7 @@ notstated_pct <- sapply(switrs_reduced, function(x) {
   mean(as.character(x) == "Not Stated", na.rm = TRUE) * 100
 })
 
-missing_tbl <- tibble(
+missing_tbl <- tibble::tibble(
   variable = names(switrs_reduced),
   pct_na = as.numeric(missing_na_pct),
   pct_notstated = as.numeric(notstated_pct)
@@ -279,6 +279,10 @@ high_miss_threshold <- 30  # percent NA (tune if needed)
 
 missing_na_pct <- colMeans(is.na(switrs_reduced)) * 100
 high_miss_vars <- names(missing_na_pct)[missing_na_pct > high_miss_threshold]
+
+# Never drop core outcome/impact fields, even if NA% is high
+protect_vars <- intersect(c("COLLISION_SEVERITY", "NUMBER_KILLED", "NUMBER_INJURED"), names(switrs_reduced))
+high_miss_vars <- setdiff(high_miss_vars, protect_vars)
 
 length(high_miss_vars)
 head(high_miss_vars, 50)
@@ -305,33 +309,88 @@ dim(switrs_reduced)
 
 # Preserve raw-coded severity and create SevereBinary outcome
 ```{r}
-# What: Preserve COLLISION_SEVERITY code and create SevereBinary.
-# Why: Codebook defines severity codes; proposal uses Severe/Fatal vs Other. 
+# Preserve raw-coded severity and create outcomes (KSI + fatal-only + deaths)
+# What: Create SevereBinary (KSI proxy) from COLLISION_SEVERITY, plus FatalBinary/Deaths for impact reporting.
+# Why: SevereBinary (codes 1/2) is the main actionable “prevent worst outcomes” target.
+#      FatalBinary/Deaths keep the story explicitly “save lives” without leaking into predictors.
 
+# --- Severity code (authoritative KSI proxy) ---
 if ("COLLISION_SEVERITY" %in% names(switrs_reduced)) {
   switrs_reduced <- switrs_reduced %>%
     mutate(
-      COLLISION_SEVERITY_CODE = as.character(COLLISION_SEVERITY),
-      COLLISION_SEVERITY_CODE = str_trim(COLLISION_SEVERITY_CODE),
-      COLLISION_SEVERITY_CODE = ifelse(
-        COLLISION_SEVERITY_CODE %in% c("", "Not Stated"),
-        NA_character_,
-        COLLISION_SEVERITY_CODE
-      )
+      COLLISION_SEVERITY_CODE = str_trim(as.character(COLLISION_SEVERITY)),
+      COLLISION_SEVERITY_CODE = ifelse(COLLISION_SEVERITY_CODE %in% c("", "Not Stated"), NA_character_, COLLISION_SEVERITY_CODE),
+
+      # Primary outcome (KSI): fatal(1) or severe injury(2)
+      SevereBinary = case_when(
+        COLLISION_SEVERITY_CODE %in% c("1","2") ~ "Severe/Fatal",   # KSI
+        COLLISION_SEVERITY_CODE %in% c("0","3","4") ~ "Other",
+        TRUE ~ NA_character_
+      ),
+      SevereBinary = factor(SevereBinary, levels = c("Other","Severe/Fatal"))
     )
+} else {
+  stop("COLLISION_SEVERITY not found; cannot create SevereBinary/KSI.")
 }
 
-switrs_reduced <- switrs_reduced %>%
-  mutate(
-    SevereBinary = case_when(
-      COLLISION_SEVERITY_CODE %in% c("1","2") ~ "Severe/Fatal",
-      COLLISION_SEVERITY_CODE %in% c("0","3","4") ~ "Other",
-      TRUE ~ NA_character_
-    ),
-    SevereBinary = factor(SevereBinary, levels = c("Other","Severe/Fatal"))
-  )
+# --- Fatal-only + deaths (for impact ranking / sensitivity) ---
+if ("NUMBER_KILLED" %in% names(switrs_reduced)) {
+  switrs_reduced <- switrs_reduced %>%
+    mutate(
+      NUMBER_KILLED_NUM = suppressWarnings(as.integer(NUMBER_KILLED)),
+      FatalBinary = case_when(
+        is.na(NUMBER_KILLED_NUM) ~ NA_integer_,
+        NUMBER_KILLED_NUM > 0 ~ 1L,
+        TRUE ~ 0L
+      ),
+      # Deaths as a numeric metric (keep NA as NA; summaries should use na.rm=TRUE)
+      Deaths = NUMBER_KILLED_NUM
+    )
+} else {
+  switrs_reduced$FatalBinary <- NA_integer_
+  switrs_reduced$Deaths <- NA_integer_
+}
 
-table(switrs_reduced$SevereBinary, useNA = "ifany")
+cat("\nOutcome counts:\n")
+print(table(switrs_reduced$SevereBinary, useNA = "ifany"))
+
+# --- Optional audit: do fatality counts disagree with severity=1? ---
+if (all(c("FatalBinary","COLLISION_SEVERITY_CODE") %in% names(switrs_reduced))) {
+  sev_fatal_code <- switrs_reduced$COLLISION_SEVERITY_CODE == "1"
+  cat("\nAudit table: COLLISION_SEVERITY==1 (fatal code) vs FatalBinary(NUMBER_KILLED>0)\n")
+  print(table(sev_fatal_code, switrs_reduced$FatalBinary, useNA = "ifany"))
+
+  mismatch <- sum(sev_fatal_code & switrs_reduced$FatalBinary == 0, na.rm = TRUE) +
+              sum(!sev_fatal_code & switrs_reduced$FatalBinary == 1, na.rm = TRUE)
+  cat("Fatal-code vs killed-count mismatches (non-NA):", mismatch, "\n")
+}
+```
+
+# Leak-proofing: ban outcome/harm variables from ever being used as predictors
+```{r}
+# Leak-proofing: ban outcome/harm variables from ever being used as predictors
+leakage_vars <- c(
+  # main outcomes / labels
+  "COLLISION_SEVERITY", "COLLISION_SEVERITY_CODE", "COLLISION_SEVERITY_LAB",
+  "SevereBinary",
+
+  # fatal/death metrics (should NEVER be predictors)
+  "NUMBER_KILLED", "NUMBER_KILLED_NUM", "FatalBinary", "Deaths",
+
+  # injury counts (harm)
+  "NUMBER_INJURED",
+  "COUNT_SEVERE_INJ", "COUNT_VISIBLE_INJ",
+  "COUNT_PED_KILLED", "COUNT_PED_INJURED",
+  "COUNT_BICYCLIST_KILLED", "COUNT_BICYCLIST_INJURED",
+  "COUNT_MC_KILLED", "COUNT_MC_INJURED",
+
+  # victim-derived “severity-ish” aggregates (harm/leakage)
+  "n_victims_killed", "any_victim_ksi"
+)
+
+leakage_vars <- intersect(leakage_vars, names(switrs_reduced))
+cat("Leakage vars detected in data (will be banned from predictors):\n")
+print(leakage_vars)
 ```
 
 # Location hotspots
@@ -408,11 +467,14 @@ min_severe  <- 1    # require at least 1 severe/fatal to be a "hotspot" by rate
 hotspot_tbl2 <- switrs_where %>%
   group_by(location_type, location_key) %>%
   summarise(
-    n_crashes = n(),
-    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
-    severe_per_100 = 100 * severe_n / n_crashes,
-    .groups = "drop"
-  )
+  n_crashes = n(),
+  severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+  severe_per_100 = 100 * severe_n / n_crashes,
+  fatal_crash_n = sum(FatalBinary == 1, na.rm = TRUE),
+  deaths = sum(Deaths, na.rm = TRUE),
+  deaths_per_100 = 100 * deaths / n_crashes,
+  .groups = "drop"
+)
 
 # A) Hotspots by RATE (with minimum volume + at least 1 severe)
 hotspots_by_rate <- hotspot_tbl2 %>%
@@ -427,6 +489,14 @@ print(head(hotspots_by_rate, 20))
 hotspots_by_count <- hotspot_tbl2 %>%
   filter(n_crashes >= min_crashes) %>%
   arrange(desc(severe_n), desc(n_crashes))
+
+# C) Hotspots by DEATHS
+hotspots_by_deaths <- hotspot_tbl2 %>%
+  filter(n_crashes >= min_crashes) %>%
+  arrange(desc(deaths), desc(n_crashes))
+
+cat("\nTop 20 hotspots by DEATHS (min_crashes =", min_crashes, "):\n")
+print(head(hotspots_by_deaths, 20))
 
 cat("\nTop 20 hotspots by Severe/Fatal COUNT (min_crashes =", min_crashes, "):\n")
 print(head(hotspots_by_count, 20))
@@ -1528,6 +1598,14 @@ candidate_predictors <- intersect(
   names(switrs_reduced)
 )
 
+# Remove any leakage vars if they were accidentally included
+candidate_predictors <- setdiff(candidate_predictors, leakage_vars)
+
+# Hard stop if anything banned still sneaks in
+if (length(intersect(candidate_predictors, leakage_vars)) > 0) {
+  stop("Leakage detected: a harm/outcome variable is in candidate_predictors.")
+}
+
 # ---- 2) Build modeling frame (NO phat in training data) ----
 model_df_clean <- switrs_reduced %>%
   dplyr::select(all_of(c("SevereBinary", candidate_predictors))) %>%
@@ -1999,7 +2077,10 @@ cat("- **Use compound-risk conditions** (e.g., night×DUI, rain×speed proxies, 
 # Why: Confirms the outcome imbalance and verifies preprocessing eliminated NA.
 
 # Use the finalized modeling frame from Chunk 7 if present; otherwise fall back
-md <- if (exists("model_df_clean2")) model_df_clean2 else model_df
+md <- NULL
+if (exists("model_df_clean2")) md <- model_df_clean2
+if (is.null(md) && exists("model_df_clean")) md <- model_df_clean
+if (is.null(md)) stop("No modeling frame found. Run the baseline modeling chunk first.")
 
 cat("Class balance (modeling frame):\n")
 print(table(md$SevereBinary))
