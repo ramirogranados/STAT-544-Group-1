@@ -87,7 +87,6 @@ normalize_not_stated <- function(x, not_stated_label = "Not Stated", blank_to_no
   if (isTRUE(blank_to_notstated)) {
     x[x == ""] <- not_stated_label
   }
-
   x
 }
 
@@ -147,7 +146,7 @@ switrs_clean <- switrs_clean %>%
 # Convert Y/N and Y-only flags carefully
 ```{r}
 # What: Standardize common flag formats into consistent factors.
-# Why: SWITRS includes Y/N/blank-not-stated fields AND Y-or-blank fields (blank = No). :contentReference[oaicite:3]{index=3}
+# Why: SWITRS includes Y/N/blank-not-stated fields AND Y-or-blank fields (blank = No).
 
 # Convert the "Y or blank" crash flags into factor(N, Y, Not Stated)
 y_or_blank_flags <- intersect(
@@ -168,7 +167,7 @@ switrs_clean <- switrs_clean %>%
 
 # Standard Y/N/Not Stated fields (e.g., INTERSECTION, STATE_HWY_IND, TOW_AWAY, AT_FAULT, etc.)
 crash_yn_whitelist <- intersect(
-  c("INTERSECTION","STATE_HWY_IND","TOW_AWAY","AT_FAULT"),  # add others you *intend*
+  c("INTERSECTION","STATE_HWY_IND","TOW_AWAY","AT_FAULT"),  # add others we *intend*
   names(switrs_clean)
 )
 
@@ -178,7 +177,7 @@ switrs_clean[crash_yn_whitelist] <- lapply(switrs_clean[crash_yn_whitelist], fun
   factor(x, levels = c("N","Y","Not Stated"))
 })
 
-# HIT_AND_RUN is F/M/N (+ Not Stated), not Y/N. :contentReference[oaicite:4]{index=4}
+# HIT_AND_RUN is F/M/N (+ Not Stated), not Y/N.
 if ("HIT_AND_RUN" %in% names(switrs_clean)) {
   switrs_clean <- switrs_clean %>%
     mutate(HIT_AND_RUN = factor(
@@ -187,7 +186,7 @@ if ("HIT_AND_RUN" %in% names(switrs_clean)) {
     ))
 }
 
-# PCF_VIOL_CATEGORY is Char(2): keep leading zeros (01, 02, ..., 24, 00). :contentReference[oaicite:5]{index=5}
+# PCF_VIOL_CATEGORY is Char(2): keep leading zeros (01, 02, ..., 24, 00). 
 if ("PCF_VIOL_CATEGORY" %in% names(switrs_clean)) {
   switrs_clean <- switrs_clean %>%
     mutate(
@@ -242,7 +241,6 @@ if ("ROAD_SURFACE" %in% names(switrs_reduced)) {
 
 # Cleanup: remove ROAD_SURFACE validation helper columns (data-quality flags)
 ```{r}
-# Cleanup: remove ROAD_SURFACE validation helper columns (data-quality flags)
 switrs_reduced <- switrs_reduced %>%
   dplyr::select(-dplyr::any_of(c("ROAD_SURFACE_invalid","ROAD_SURFACE_raw")))
 ```
@@ -295,7 +293,7 @@ dim(switrs_reduced)
 
 # drop deprecated / non-analytic variables
 ```{r}
-# What: Remove variables deprecated in the codebook or not analytically useful. :contentReference[oaicite:13]{index=13}
+# What: Remove variables deprecated in the codebook or not analytically useful.
 
 drop_vars <- intersect(
   c("CHP_SHIFT","BEAT_TYPE","CHP_BEAT_CLASS","CALTRANS_COUNTY","CALTRANS_DISTRICT","STATE_ROUTE",
@@ -508,9 +506,8 @@ dplyr::count(switrs_where, location_type)
 summary(nchar(switrs_where$location_key))
 ```
 
-# Derive core time features
+# Derive core time features(+ engineered risk flags & interactions)
 ```{r}
-# Derive core time features (+ engineered risk flags & interactions)
 # What: Derive standardized time features (year, hour, weekend, time_bucket) and
 #       engineer proposal-aligned risk flags + interaction terms.
 # Why:  (1) Time features directly answer the client’s “when should we focus?” question.
@@ -685,6 +682,292 @@ switrs_reduced <- switrs_reduced %>%
   ))
 ```
 
+# HYPOTHESIS TEST (ONE-SIDED): Weekend has higher Severe/Fatal rate than Weekday
+```{r}
+# What: Test whether the Severe/Fatal proportion is higher on weekends vs weekdays.
+# Why: This answers the directional policy question (“which is worse?”) using a formal one-sided test.
+
+if (!all(c("weekend", "SevereBinary") %in% names(switrs_reduced))) {
+  stop("Need 'weekend' and 'SevereBinary' in switrs_reduced. Run the feature engineering + outcome chunks first.")
+}
+
+df_wk <- switrs_reduced %>%
+  dplyr::filter(!is.na(weekend), !is.na(SevereBinary)) %>%
+  dplyr::mutate(
+    weekend = as.character(weekend),
+    is_severe = (SevereBinary == "Severe/Fatal")
+  ) %>%
+  dplyr::filter(weekend %in% c("Weekend", "Weekday"))
+
+# Counts
+n_weekend <- sum(df_wk$weekend == "Weekend")
+n_weekday <- sum(df_wk$weekend == "Weekday")
+
+x_weekend <- sum(df_wk$is_severe[df_wk$weekend == "Weekend"], na.rm = TRUE)
+x_weekday <- sum(df_wk$is_severe[df_wk$weekend == "Weekday"], na.rm = TRUE)
+
+p_weekend <- x_weekend / n_weekend
+p_weekday <- x_weekday / n_weekday
+diff_pp   <- 100 * (p_weekend - p_weekday)
+
+cat("\n============================================================\n")
+cat("ONE-SIDED TWO-PROPORTION TEST: Weekend > Weekday\n")
+cat("============================================================\n")
+
+cat("\nH0: p_weekend <= p_weekday\n")
+cat("HA: p_weekend  > p_weekday\n")
+
+cat("\nGroup summaries:\n")
+cat("  Weekend: n =", n_weekend, "| severe =", x_weekend, "| p̂ =", round(p_weekend, 4), "\n")
+cat("  Weekday: n =", n_weekday, "| severe =", x_weekday, "| p̂ =", round(p_weekday, 4), "\n")
+cat("\nDifference (Weekend - Weekday) =", round(diff_pp, 3), "percentage points\n")
+
+# One-sided prop test (approx z-test; no continuity correction)
+test_wk <- suppressWarnings(
+  prop.test(
+    x = c(x_weekend, x_weekday),
+    n = c(n_weekend, n_weekday),
+    alternative = "greater",
+    correct = FALSE
+  )
+)
+
+cat("\nTest statistic (X-squared):", round(unname(test_wk$statistic), 4), "\n")
+cat("One-sided p-value:", signif(test_wk$p.value, 5), "\n")
+
+if (!is.na(test_wk$p.value) && test_wk$p.value < 0.05) {
+  cat("\nConclusion (alpha=0.05): Reject H0. Weekends have a HIGHER Severe/Fatal rate than weekdays.\n")
+} else {
+  cat("\nConclusion (alpha=0.05): Fail to reject H0. Not enough evidence that weekends are higher.\n")
+}
+```
+
+# Hypothesis testing continued: Severe/Fatal vs Other for all predictors (or as many as possible)
+```{r}
+# What: Run appropriate tests for every column vs SevereBinary.
+# Why: Professor request: hypothesis tests for all variables (or as many as we can).
+
+# ----------------------------
+# Configuration knobs
+# ----------------------------
+max_levels <- 60     # skip categorical predictors with > this many unique levels
+chisq_B    <- 2000   # simulation reps when expected counts are small
+min_n_per_group <- 10
+verbose_per_var <- TRUE   # TRUE = print blocks like your screenshot; FALSE = summary only
+
+if (!exists("switrs_reduced")) stop("switrs_reduced not found.")
+if (!("SevereBinary" %in% names(switrs_reduced))) stop("SevereBinary not found in switrs_reduced.")
+if (!exists("leakage_vars")) leakage_vars <- character(0)
+
+# ----------------------------
+# Choose variables: ALL columns except outcome/leakage and obvious IDs
+# ----------------------------
+exclude_always <- c(
+  "SevereBinary",
+  "CASE_ID",
+  "COLLISION_SEVERITY",
+  "COLLISION_SEVERITY_CODE",
+  "FatalBinary","Deaths","NUMBER_KILLED","NUMBER_KILLED_NUM","NUMBER_INJURED"
+)
+
+vars_all <- setdiff(names(switrs_reduced), unique(c(exclude_always, leakage_vars)))
+cat("Total candidate variables to test:", length(vars_all), "\n")
+
+# ----------------------------
+# Label rownames for printing ONLY (does not change counts/levels)
+# ----------------------------
+label_rows_if_available <- function(var_name, tab) {
+  if (exists("legend_maps") && exists("lookup_meaning") && var_name %in% names(legend_maps)) {
+    rn <- rownames(tab)
+    rownames(tab) <- lookup_meaning(rn, legend_maps[[var_name]])
+  }
+  tab
+}
+
+# ----------------------------
+# Main test runner (one variable)
+# ----------------------------
+test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereBinary") {
+
+  df <- data %>%
+    dplyr::select(all_of(c(outcome, var_name))) %>%
+    dplyr::filter(!is.na(.data[[outcome]]))
+
+  df[[outcome]] <- factor(df[[outcome]], levels = c("Other","Severe/Fatal"))
+  x <- df[[var_name]]
+
+  # Skip all-missing
+  if (all(is.na(x))) {
+    if (verbose_per_var) {
+      cat("\n============================================================\n")
+      cat("VARIABLE:", var_name, "\n")
+      cat("============================================================\n")
+      cat("SKIP: All missing\n")
+    }
+    return(tibble::tibble(variable = var_name, type = "NA", test = "SKIP",
+                          p_value = NA_real_, p_value_alt = NA_real_,
+                          n_used = 0L, note = "All missing"))
+  }
+
+  # Treat numeric 0/1 (or 2 unique values) as categorical
+  if (is.numeric(x) || is.integer(x)) {
+    ux <- unique(x[is.finite(x)])
+    if (length(ux) <= 2) x <- as.factor(x)
+  }
+
+  # -------------------------
+  # NUMERIC: Welch t-test + Wilcoxon (FIXED)
+  # -------------------------
+  if (is.numeric(x) || is.integer(x)) {
+    df2 <- df %>%
+      dplyr::mutate(x_num = as.numeric(.data[[var_name]])) %>%
+      dplyr::filter(is.finite(x_num))
+
+    n_other <- sum(df2[[outcome]] == "Other")
+    n_sev   <- sum(df2[[outcome]] == "Severe/Fatal")
+
+    if (verbose_per_var) {
+      cat("\n============================================================\n")
+      cat("VARIABLE:", var_name, "\n")
+      cat("============================================================\n")
+      cat("Type: numeric\n")
+      cat("H0: mean(x|Severe/Fatal) = mean(x|Other)\n")
+      cat("HA: means differ\n\n")
+      cat("Group means:\n")
+      cat("  Other:       n =", n_other, " mean =", round(mean(df2$x_num[df2[[outcome]]=="Other"]), 4), "\n")
+      cat("  Severe/Fatal:n =", n_sev,   " mean =", round(mean(df2$x_num[df2[[outcome]]=="Severe/Fatal"]), 4), "\n\n")
+    }
+
+    if (n_other < min_n_per_group || n_sev < min_n_per_group) {
+      if (verbose_per_var) cat("SKIP: Too few observations in one group\n")
+      return(tibble::tibble(variable = var_name, type = "numeric", test = "SKIP",
+                            p_value = NA_real_, p_value_alt = NA_real_,
+                            n_used = nrow(df2), note = "Too few observations in one group"))
+    }
+
+    # FIX: create a real grouping column for formula methods
+    df2$g <- df2[[outcome]]
+
+    tt <- tryCatch(t.test(x_num ~ g, data = df2, var.equal = FALSE), error = function(e) NULL)
+    wx <- tryCatch(wilcox.test(x_num ~ g, data = df2, exact = FALSE), error = function(e) NULL)
+
+    if (verbose_per_var) {
+      cat("Welch t-test p-value:", if (!is.null(tt)) signif(tt$p.value, 6) else "NA", "\n")
+      cat("Wilcoxon p-value:    ", if (!is.null(wx)) signif(wx$p.value, 6) else "NA", "\n")
+    }
+
+    return(tibble::tibble(
+      variable = var_name,
+      type = "numeric",
+      test = "Welch t-test (+ Wilcoxon)",
+      p_value = if (!is.null(tt)) tt$p.value else NA_real_,
+      p_value_alt = if (!is.null(wx)) wx$p.value else NA_real_,
+      n_used = nrow(df2),
+      note = NA_character_
+    ))
+  }
+
+  # -------------------------
+  # CATEGORICAL: 2-level prop.test; 3+ chi-square
+  # -------------------------
+  x_chr <- normalize_not_stated(x, blank_to_notstated = TRUE)
+  df2 <- df %>% dplyr::mutate(x = x_chr) %>% dplyr::filter(!is.na(x))
+
+  k <- length(unique(df2$x))
+  if (k <= 1) {
+    if (verbose_per_var) {
+      cat("\n============================================================\n")
+      cat("VARIABLE:", var_name, "\n")
+      cat("============================================================\n")
+      cat("SKIP: Constant after filtering\n")
+    }
+    return(tibble::tibble(variable = var_name, type = "categorical", test = "SKIP",
+                          p_value = NA_real_, p_value_alt = NA_real_,
+                          n_used = nrow(df2), note = "Constant after filtering"))
+  }
+  if (k > max_levels) {
+    if (verbose_per_var) {
+      cat("\n============================================================\n")
+      cat("VARIABLE:", var_name, "\n")
+      cat("============================================================\n")
+      cat("SKIP: High cardinality (", k, " levels > ", max_levels, ")\n", sep = "")
+    }
+    return(tibble::tibble(variable = var_name, type = "categorical", test = "SKIP",
+                          p_value = NA_real_, p_value_alt = NA_real_,
+                          n_used = nrow(df2), note = paste0("High cardinality (", k, " levels > ", max_levels, ")")))
+  }
+
+  tab <- table(df2$x, df2[[outcome]], useNA = "no")
+
+  if (verbose_per_var) {
+    cat("\n============================================================\n")
+    cat("VARIABLE:", var_name, "\n")
+    cat("============================================================\n")
+    cat("Type: categorical\n\n")
+    tab_print <- label_rows_if_available(var_name, tab)
+    cat("Contingency table (rows = predictor, cols = outcome):\n")
+    print(addmargins(tab_print))
+    cat("\n")
+  }
+
+  # 2-level => two-proportion test
+  if (nrow(tab) == 2) {
+    x_succ <- tab[, "Severe/Fatal"]
+    n_tot  <- rowSums(tab)
+    pt <- suppressWarnings(prop.test(x = x_succ, n = n_tot, correct = FALSE))
+
+    if (verbose_per_var) cat("Two-proportion test p-value:", signif(pt$p.value, 6), "\n")
+
+    return(tibble::tibble(
+      variable = var_name,
+      type = "categorical (2 levels)",
+      test = "Two-proportion test (prop.test)",
+      p_value = pt$p.value,
+      p_value_alt = NA_real_,
+      n_used = sum(tab),
+      note = NA_character_
+    ))
+  }
+
+  # 3+ levels => chi-square; simulate if small expected
+  cs0 <- suppressWarnings(chisq.test(tab))
+  use_sim <- any(cs0$expected < 5)
+  cs <- if (use_sim) suppressWarnings(chisq.test(tab, simulate.p.value = TRUE, B = chisq_B)) else cs0
+
+  if (verbose_per_var) cat("Chi-square p-value:", signif(cs$p.value, 6), if (use_sim) " (sim)\n" else "\n")
+
+  tibble::tibble(
+    variable = var_name,
+    type = paste0("categorical (", nrow(tab), " levels)"),
+    test = if (use_sim) paste0("Chi-square (sim p, B=", chisq_B, ")") else "Chi-square",
+    p_value = cs$p.value,
+    p_value_alt = NA_real_,
+    n_used = sum(tab),
+    note = NA_character_
+  )
+}
+
+# ----------------------------
+# Run all tests + summary (like previous version)
+# ----------------------------
+results_all <- purrr::map_dfr(vars_all, ~ test_one_var_all(.x))
+
+results_all <- results_all %>%
+  dplyr::mutate(
+    p_adj_fdr = p.adjust(p_value, method = "BH")
+  ) %>%
+  dplyr::arrange(p_adj_fdr, p_value)
+
+cat("\n\n==================== SUMMARY (sorted by FDR) ====================\n")
+print(head(results_all, 50))
+
+cat("\nHow many were skipped?\n")
+print(table(results_all$test, useNA = "ifany"))
+
+cat("\nTop skip reasons:\n")
+print(results_all %>% dplyr::filter(test == "SKIP") %>% dplyr::count(note, sort = TRUE) %>% head(20))
+```
+
 # Month and seasonality panel (feature engineering and storyboard-ready rate plot)
 ```{r}
 # TIME: Robust collision_date parsing + month seasonality panel (REPLACE ENTIRE CHUNK)
@@ -751,9 +1034,8 @@ ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
   theme(panel.grid.minor = element_blank())
 ```
 
-# Statistics report chunk
+# Statistics report chunk: Hypothesis tests on Severe/Fatal proportions (week 8 deliverable)
 ```{r}
-# STATISTICS REPORT: Hypothesis tests on Severe/Fatal proportions (Week 8 deliverable)
 # What: Run two-proportion tests for Severe/Fatal rate differences across key groups.
 # Why: Produces a formal hypothesis test artifact aligned with the course requirement and client decisions.
 
@@ -861,7 +1143,7 @@ if ("WEATHER_1" %in% names(switrs_reduced)) {
 }
 
 # ---- Test 3: Night×DUI proxy (interaction) vs not ----
-# Uses engineered factor night_dui = Yes/No if your time-feature chunk ran.
+# Uses engineered factor night_dui = Yes/No if our time-feature chunk ran.
 if ("night_dui" %in% names(switrs_reduced)) {
 
   df_nd <- switrs_reduced %>%
@@ -881,9 +1163,8 @@ if ("night_dui" %in% names(switrs_reduced)) {
 }
 ```
 
-# Statistics report (add-on)
+# Statistics report (add-on):Dark vs Daylight, Alcohol vs No Alcohol, Rain×Speeding
 ```{r}
-# STATISTICS REPORT (ADD-ON): Dark vs Daylight, Alcohol vs No Alcohol, Rain×Speeding
 # What: Add two-proportion tests tied to operational decisions and compound-risk conditions.
 # Why: These map directly to interventions (night visibility, DUI enforcement, wet-weather speed control).
 
@@ -918,7 +1199,7 @@ if ("LIGHTING" %in% names(switrs_reduced)) {
 }
 
 # ---- Test 5: Alcohol involved vs not (ALCOHOL_INVOLVED) ----
-# Your cleaning should yield N/Y/Not Stated; we restrict to N vs Y for a clean 2-group test
+# our cleaning should yield N/Y/Not Stated; we restrict to N vs Y for a clean 2-group test
 if ("ALCOHOL_INVOLVED" %in% names(switrs_reduced)) {
 
   df_alc <- switrs_reduced %>%
@@ -945,7 +1226,7 @@ if ("ALCOHOL_INVOLVED" %in% names(switrs_reduced)) {
 }
 
 # ---- Test 6: Rain × Unsafe Speed proxy (interaction) vs not ----
-# Uses engineered factor rain_speed = Yes/No if your time-feature chunk ran.
+# Uses engineered factor rain_speed = Yes/No if our time-feature chunk ran.
 if ("rain_speed" %in% names(switrs_reduced)) {
 
   df_rs <- switrs_reduced %>%
@@ -965,9 +1246,8 @@ if ("rain_speed" %in% names(switrs_reduced)) {
 }
 ```
 
-#Scenario Ranking (top combinations & rates & counts)
+# Scenario Ranking (top combinations & rates & counts)
 ```{r}
-# SCENARIO RANKING: Highest-risk combinations (rates + counts)
 # What: Build interpretable “scenario” groups from time + environment + impairment + pedestrian context,
 #       then rank by severe/fatal RATE (risk intensity) and COUNT (severe/fatal burden).
 # Why:  This directly answers the client’s decision question: “When and under what conditions should we focus
@@ -1127,7 +1407,7 @@ if (length(interaction_vars) > 0) {
 
   print(interaction_tbl %>% arrange(term, desc(group)))
 } else {
-  cat("\nNo interaction variables found (night_dui/rain_speed/ped_dark). If you added the time-feature chunk, re-run it.\n")
+  cat("\nNo interaction variables found (night_dui/rain_speed/ped_dark). If we added the time-feature chunk, re-run it.\n")
 }
 ```
 
@@ -1244,13 +1524,14 @@ if (length(interaction_vars) > 0) {
 
 # codebook label dictionaries
 ```{r}
-# What: Given a vector of raw codes and a named legend vector, return meanings.
-# Why: Handles "1" vs "01" etc. without rewriting your data.
+# What: Map SWITRS codes -> human-readable labels (used in plots + contingency tables).
+# Why: Lets tables/plots display meanings instead of raw codes.
 
 lookup_meaning <- function(x, legend_vec) {
-  x0 <- normalize_not_stated(x)
+  # x: raw codes; legend_vec: named vector mapping code -> meaning
+  x0 <- normalize_not_stated(x, blank_to_notstated = TRUE)
 
-  # if exact match exists, use it
+  # exact match
   out <- unname(legend_vec[x0])
 
   # if missing, try left-pad to width 2 for numeric-looking codes (e.g., PCF_VIOL_CATEGORY)
@@ -1259,38 +1540,68 @@ lookup_meaning <- function(x, legend_vec) {
   x2[needs_pad] <- sprintf("%02d", as.integer(x0[needs_pad]))
   out2 <- unname(legend_vec[x2])
 
-  # fill remaining from padded attempt
   out[is.na(out)] <- out2[is.na(out)]
 
+  # fallback to original code if still missing
+  out[is.na(out) | out == ""] <- x0[is.na(out) | out == ""]
   out
 }
 
 legend_maps <- list(
   DAY_OF_WEEK = c(
     "1"="Monday","2"="Tuesday","3"="Wednesday","4"="Thursday",
-    "5"="Friday","6"="Saturday","7"="Sunday"
+    "5"="Friday","6"="Saturday","7"="Sunday",
+    "Not Stated"="Not Stated"
   ),
+
+  # INCLUDED : LIGHTING
+  LIGHTING = c(
+    "A"="Daylight",
+    "B"="Dusk - Dawn",
+    "C"="Dark - Street Lights",
+    "D"="Dark - No Street Lights",
+    "E"="Dark - Street Lights Not Functioning",
+    "Not Stated"="Not Stated"
+  ),
+
   WEATHER_1 = c(
     "A"="Clear","B"="Cloudy","C"="Raining","D"="Snowing","E"="Fog","F"="Other","G"="Wind",
     "Not Stated"="Not Stated"
   ),
-  LIGHTING = c(
-    "A"="Daylight","B"="Dusk - Dawn","C"="Dark - Street Lights","D"="Dark - No Street Lights",
-    "E"="Dark - Street Lights Not Functioning","Not Stated"="Not Stated"
-  ),
+
   ROAD_SURFACE = c(
-    "A"="Dry","B"="Wet","C"="Snowy or Icy","D"="Slippery (Muddy/Oily/etc.)","Not Stated"="Not Stated"
+    "A"="Dry","B"="Wet","C"="Snowy or Icy","D"="Slippery (Muddy/Oily/etc.)",
+    "Not Stated"="Not Stated"
   ),
-  INTERSECTION = c("Y"="Intersection","N"="Not Intersection","Not Stated"="Not Stated"),
+
+  INTERSECTION = c(
+    "Y"="Yes","N"="No",
+    "1"="Yes","0"="No",
+    "Not Stated"="Not Stated"
+  ),
+
   PRIMARY_COLL_FACTOR = c(
-    "A"="Code Violation","B"="Other Improper Driving","C"="Other Than Driver",
-    "D"="Unknown","E"="Fell Asleep","Not Stated"="Not Stated"
+    "A"="Code Violation",
+    "B"="Other Improper Driving",
+    "C"="Other Than Driver",
+    "D"="Unknown",
+    "E"="Fell Asleep",
+    "Not Stated"="Not Stated"
   ),
+
+  # INCLUDED : TYPE_OF_COLLISION
   TYPE_OF_COLLISION = c(
-    "A"="Head-On","B"="Sideswipe","C"="Rear End","D"="Broadside","E"="Hit Object","F"="Overturned",
-    "G"="Vehicle/Pedestrian","H"="Other","Not Stated"="Not Stated"
+    "A"="Head-On",
+    "B"="Sideswipe",
+    "C"="Rear End",
+    "D"="Broadside",
+    "E"="Hit Object",
+    "F"="Overturned",
+    "G"="Vehicle/Pedestrian",
+    "H"="Other",
+    "Not Stated"="Not Stated"
   ),
-  # PCF_VIOL_CATEGORY codes per codebook. :contentReference[oaicite:16]{index=16}
+
   PCF_VIOL_CATEGORY = c(
     "01"="DUI (Alcohol/Drug)",
     "02"="Impeding Traffic",
@@ -1317,32 +1628,86 @@ legend_maps <- list(
     "00"="Unknown",
     "Not Stated"="Not Stated"
   ),
-  # HIT_AND_RUN codes per codebook. :contentReference[oaicite:17]{index=17}
+
   HIT_AND_RUN = c(
     "F"="Felony",
     "M"="Misdemeanor",
     "N"="Not Hit and Run",
     "Not Stated"="Not Stated"
+  ),
+
+  # INCLUDED : PEDESTRIAN_ACCIDENT
+  PEDESTRIAN_ACCIDENT = c(
+    "Y"="Yes","N"="No",
+    "1"="Yes","0"="No",
+    "Not Stated"="Not Stated"
+  ),
+
+  # INCLUDED : MOTORCYCLE_ACCIDENT
+  MOTORCYCLE_ACCIDENT = c(
+    "Y"="Yes","N"="No",
+    "1"="Yes","0"="No",
+    "Not Stated"="Not Stated"
+  ),
+
+  # INCLUDED : ANY_PARTY_DRUG
+  ANY_PARTY_DRUG = c(
+    "Y"="Yes","N"="No",
+    "1"="Yes","0"="No",
+    "Not Stated"="Not Stated"
   )
 )
+# --- Add/override legends for requested variables (minimal patch) ---
 
-# What: Print a clean legend table for a variable.
-# Why: You want a readable legend under plots; duplicate aliases ("1" and "01") are collapsed.
+legend_maps$TYPE_OF_COLLISION <- c(
+  "A"="Head-On",
+  "B"="Sideswipe",
+  "C"="Rear End",
+  "D"="Broadside",
+  "E"="Hit Object",
+  "F"="Overturned",
+  "G"="Vehicle/Pedestrian",
+  "H"="Other",
+  "Not Stated"="Not Stated"
+)
+
+legend_maps$LIGHTING <- c(
+  "A"="Daylight",
+  "B"="Dusk - Dawn",
+  "C"="Dark - Street Lights",
+  "D"="Dark - No Street Lights",
+  "E"="Dark - Street Lights Not Functioning",
+  "Not Stated"="Not Stated"
+)
+
+legend_maps$PEDESTRIAN_ACCIDENT <- c(
+  "Y"="Yes","N"="No",
+  "Not Stated"="Not Stated"
+)
+
+legend_maps$MOTORCYCLE_ACCIDENT <- c(
+  "Y"="Yes","N"="No",
+  "Not Stated"="Not Stated"
+)
+
+# Party aggregate name varies by our merge; support both:
+legend_maps$ANY_PARTY_DRUG <- c(
+  "1"="Yes","0"="No","Y"="Yes","N"="No",
+  "Not Stated"="Not Stated"
+)
+legend_maps$any_party_drug <- legend_maps$ANY_PARTY_DRUG
 
 print_legend <- function(var_name, dedupe_meaning = TRUE) {
   if (!var_name %in% names(legend_maps)) return(invisible(NULL))
-
   m <- legend_maps[[var_name]]
+
   df <- data.frame(
     code = names(m),
     meaning = unname(m),
     stringsAsFactors = FALSE
   )
 
-  if (dedupe_meaning) {
-    # keep the first occurrence of each meaning (so "1" and "01" don't both show)
-    df <- df[!duplicated(df$meaning), ]
-  }
+  if (dedupe_meaning) df <- df[!duplicated(df$meaning), ]
 
   cat("\nLEGEND for", var_name, ":\n")
   print(df, row.names = FALSE)
@@ -1695,6 +2060,7 @@ glm_fit_final <- glm(
   family = binomial(),
   control = glm.control(maxit = 50)
 )
+glm_fit_final
 
 cat("GLM converged? ", glm_fit_final$converged, "\n", sep = "")
 
@@ -1744,7 +2110,117 @@ cat("\nTop 20 GLM odds ratios by |log(OR)| (FAST Wald CI, train fit):\n")
 print(head(or_tbl, 20))
 ```
 
-# Penalized logistic regression
+# What-if / one-at-a-time probability changes (GLM)
+```{r}
+# What: Build a "typical crash" baseline row, then vary one predictor while holding others fixed.
+# Why: Turns the model into an actionable simulator: "if we change X, how does risk move?"
+
+if (!exists("glm_fit_final")) stop("glm_fit_final not found. Run the baseline GLM chunk first.")
+if (!exists("train_set")) stop("train_set not found. Run the baseline GLM chunk first.")
+
+# --- Reference predictor frame (exact columns & factor levels used in the GLM) ---
+model_vars <- setdiff(names(train_set), "SevereBinary")
+X_ref <- train_set[, model_vars, drop = FALSE]
+
+# --- Helpers to build a baseline profile ---
+mode_level <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA)
+  names(which.max(table(x)))[1]
+}
+
+baseline_row <- as.data.frame(lapply(X_ref, function(col) {
+  if (is.numeric(col) || is.integer(col)) {
+    as.numeric(stats::median(col, na.rm = TRUE))
+  } else {
+    mode_level(as.character(col))
+  }
+}), stringsAsFactors = FALSE)
+
+# restore factor types/levels exactly
+for (v in names(X_ref)) {
+  if (is.factor(X_ref[[v]])) {
+    baseline_row[[v]] <- factor(baseline_row[[v]], levels = levels(X_ref[[v]]))
+  } else if (is.integer(X_ref[[v]])) {
+    baseline_row[[v]] <- as.integer(round(as.numeric(baseline_row[[v]])))
+  } else if (is.numeric(X_ref[[v]])) {
+    baseline_row[[v]] <- as.numeric(baseline_row[[v]])
+  }
+}
+
+# baseline probability
+p0 <- as.numeric(predict(glm_fit_final, newdata = baseline_row, type = "response"))
+
+# --- Main function: vary one variable, hold the rest fixed ---
+what_if <- function(var_name, values = NULL, model = glm_fit_final, base = baseline_row, ref = X_ref) {
+  if (!var_name %in% names(base)) stop("Variable not in model predictors: ", var_name)
+
+  xref <- ref[[var_name]]
+
+  # default values if none supplied
+  if (is.null(values)) {
+    if (is.factor(xref) || is.character(xref)) {
+      values <- if (is.factor(xref)) levels(xref) else sort(unique(na.omit(xref)))
+    } else {
+      # numeric: show 10th/50th/90th percentiles
+      qs <- stats::quantile(xref, probs = c(0.10, 0.50, 0.90), na.rm = TRUE, names = FALSE)
+      values <- as.numeric(qs)
+    }
+  }
+
+  # baseline value (for delta)
+  base_val <- as.character(base[[var_name]])
+
+  out <- lapply(values, function(val) {
+    nd <- base
+
+    if (is.factor(xref)) {
+      nd[[var_name]] <- factor(as.character(val), levels = levels(xref))
+    } else if (is.integer(xref)) {
+      nd[[var_name]] <- as.integer(val)
+    } else if (is.numeric(xref)) {
+      nd[[var_name]] <- as.numeric(val)
+    } else {
+      nd[[var_name]] <- as.character(val)
+    }
+
+    p <- as.numeric(predict(model, newdata = nd, type = "response"))
+    data.frame(
+      variable = var_name,
+      value = as.character(val),
+      p_severe = p,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  out <- dplyr::bind_rows(out) %>%
+    dplyr::mutate(
+      p_baseline = p0,
+      delta_pp = 100 * (p_severe - p_baseline),
+      baseline_value = base_val
+    ) %>%
+    dplyr::arrange(dplyr::desc(p_severe))
+
+  out
+}
+
+# ---- Example 1 (recommended): weekend what-if ----
+if ("weekend" %in% names(baseline_row)) {
+  wk_vals <- intersect(c("Weekday","Weekend"), levels(X_ref$weekend))
+  what_if_weekend <- what_if("weekend", values = wk_vals)
+  print(what_if_weekend)
+} else {
+  cat("weekend not in model predictors.\n")
+}
+
+what_if("LIGHTING", c("A","C","D","E","Not Stated"))
+what_if("pcf_speed", c("No","Yes"))
+what_if("WEATHER_1")
+what_if("PCF_VIOL_CATEGORY")
+what_if("time_bucket")
+```
+
+# Penalized logistic regression: GLMNET model
 ```{r glmnet_model, message=FALSE, warning=FALSE}
 # MODEL UPGRADE: Penalized Logistic Regression (glmnet)
 # What: Fit LASSO logistic regression with cross-validation using a consistent one-hot encoding
@@ -1839,9 +2315,8 @@ cat("\nTop 20 non-zero coefficients by |coef| (glmnet, lambda.1se):\n")
 print(head(coef_df, 20))
 ```
 
-# Feature selection
+# Feature selection(glmnet LASSO)
 ```{r feature_selection_summary}
-# FEATURE SELECTION SUMMARY (glmnet LASSO)
 # What: Extract selected predictors from glmnet (non-zero coefficients at lambda.1se).
 # Why: Makes “feature selection” explicit + reportable (which variables survived selection).
 
@@ -1879,6 +2354,471 @@ selected_vars <- coef_df %>%
 
 cat("\nSelected base variables (ranked by how many active dummy terms they contribute):\n")
 print(selected_vars)
+```
+
+# What-if for the most important (LASSO selected) features
+```{r}
+# (3) WHAT-IF ANALYSIS (FIXED): uses glm_fit_final$xlevels so predict() never sees "new levels"
+if (!exists("glm_fit_final")) stop("glm_fit_final not found. Run baseline GLM chunk first.")
+if (!exists("train_set")) stop("train_set not found. Run baseline GLM chunk first.")
+
+model_vars <- setdiff(names(train_set), "SevereBinary")
+X_ref <- train_set[, model_vars, drop = FALSE]
+
+# Model factor levels (source of truth for predict())
+model_xlev <- glm_fit_final$xlevels  # named list for factor predictors
+
+mode_level <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_character_)
+  names(which.max(table(x)))[1]
+}
+
+safe_predict_prob <- function(model, newdata) {
+  # suppresses rank-deficient warning spam; prediction still computed
+  as.numeric(suppressWarnings(predict(model, newdata = newdata, type = "response")))
+}
+
+# ---- Build a "typical crash" baseline row that is guaranteed valid for the model ----
+baseline_row <- as.data.frame(lapply(names(X_ref), function(v) {
+  col <- X_ref[[v]]
+
+  # factor predictors: pick most common observed value that is allowed by model_xlev
+  if (v %in% names(model_xlev)) {
+    allowed <- model_xlev[[v]]
+    obs_mode <- mode_level(as.character(col))
+    # if mode not allowed (or NA), fall back to most frequent allowed level
+    if (is.na(obs_mode) || !(obs_mode %in% allowed)) {
+      freq <- sort(table(as.character(col)), decreasing = TRUE)
+      cand <- intersect(names(freq), allowed)
+      obs_mode <- if (length(cand) > 0) cand[1] else allowed[1]
+    }
+    return(factor(obs_mode, levels = allowed))
+  }
+
+  # numeric/integer predictors
+  if (is.numeric(col) || is.integer(col)) {
+    return(as.numeric(stats::median(col, na.rm = TRUE)))
+  }
+
+  # character predictors (rare here if model was built correctly)
+  mode_level(as.character(col))
+}), stringsAsFactors = FALSE)
+
+names(baseline_row) <- names(X_ref)
+
+# Restore integer type where appropriate
+for (v in names(X_ref)) {
+  if (is.integer(X_ref[[v]]) && !(v %in% names(model_xlev))) {
+    baseline_row[[v]] <- as.integer(round(as.numeric(baseline_row[[v]])))
+  }
+}
+
+p0 <- safe_predict_prob(glm_fit_final, baseline_row)
+
+# ---- Main what-if function (guarantees factor levels match model_xlev) ----
+what_if <- function(var_name, values = NULL,
+                    model = glm_fit_final, base = baseline_row, ref = X_ref, xlev = model_xlev) {
+
+  if (!var_name %in% names(base)) stop("Variable not in model predictors: ", var_name)
+
+  # Factor predictor in the model
+  if (var_name %in% names(xlev)) {
+    allowed <- xlev[[var_name]]
+
+    if (is.null(values)) values <- allowed
+    values <- as.character(values)
+    values <- values[values %in% allowed]
+
+    if (length(values) == 0) stop("No provided values are valid levels for ", var_name)
+
+    out <- lapply(values, function(val) {
+      nd <- base
+      nd[[var_name]] <- factor(val, levels = allowed)
+      p <- safe_predict_prob(model, nd)
+      data.frame(variable = var_name, value = val, p_severe = p, stringsAsFactors = FALSE)
+    })
+
+    out <- dplyr::bind_rows(out) %>%
+      dplyr::mutate(
+        p_baseline = p0,
+        delta_pp = 100 * (p_severe - p_baseline),
+        baseline_value = as.character(base[[var_name]])
+      ) %>%
+      dplyr::arrange(dplyr::desc(p_severe))
+
+    return(out)
+  }
+
+  # Numeric predictor
+  xref <- ref[[var_name]]
+  if (is.null(values)) {
+    qs <- stats::quantile(xref, probs = c(0.10, 0.50, 0.90), na.rm = TRUE, names = FALSE)
+    values <- as.numeric(qs)
+  }
+
+  out <- lapply(values, function(val) {
+    nd <- base
+    if (is.integer(xref)) nd[[var_name]] <- as.integer(val) else nd[[var_name]] <- as.numeric(val)
+    p <- safe_predict_prob(model, nd)
+    data.frame(variable = var_name, value = as.character(val), p_severe = p, stringsAsFactors = FALSE)
+  })
+
+  dplyr::bind_rows(out) %>%
+    dplyr::mutate(
+      p_baseline = p0,
+      delta_pp = 100 * (p_severe - p_baseline),
+      baseline_value = as.character(base[[var_name]])
+    ) %>%
+    dplyr::arrange(dplyr::desc(p_severe))
+}
+# (3) WHAT-IF FOR MOST IMPORTANT FEATURES (LASSO base vars) — FIXED
+if (!exists("selected_vars")) stop("selected_vars not found. Run feature_selection_summary first.")
+
+top_k <- 10
+
+important_vars <- selected_vars %>%
+  dplyr::arrange(dplyr::desc(n)) %>%
+  dplyr::pull(base_var) %>%
+  unique()
+
+important_vars <- important_vars[!grepl("_miss$", important_vars)]
+important_vars <- important_vars[important_vars %in% names(baseline_row)]
+important_vars <- head(important_vars, top_k)
+
+cat("Most important variables (top ", top_k, "):\n", sep = "")
+print(important_vars)
+
+# choose up to K levels for high-cardinality factors, always including baseline value
+pick_levels <- function(var_name, ref, xlev, max_show = 8) {
+  allowed <- xlev[[var_name]]
+  if (length(allowed) <= max_show) return(allowed)
+
+  base_val <- as.character(baseline_row[[var_name]])
+  freq <- sort(table(as.character(ref[[var_name]])), decreasing = TRUE)
+  top_levs <- intersect(names(freq), allowed)
+  vals <- unique(c(base_val, head(top_levs, max_show)))
+  vals[vals %in% allowed]
+}
+
+whatif_tables <- list()
+for (v in important_vars) {
+  if (v %in% names(glm_fit_final$xlevels)) {
+    vals <- pick_levels(v, train_set, glm_fit_final$xlevels, max_show = 8)
+    whatif_tables[[v]] <- what_if(v, values = vals)
+  } else {
+    whatif_tables[[v]] <- what_if(v)  # numeric -> 10/50/90 by default
+  }
+}
+
+whatif_summary <- purrr::imap_dfr(whatif_tables, function(tbl, varname) {
+  best <- tbl[which.max(tbl$p_severe), , drop = FALSE]
+  worst <- tbl[which.min(tbl$p_severe), , drop = FALSE]
+  data.frame(
+    variable = varname,
+    baseline_value = best$baseline_value[1],
+    baseline_p = best$p_baseline[1],
+    best_value = best$value[1],
+    best_p = best$p_severe[1],
+    best_delta_pp = best$delta_pp[1],
+    worst_value = worst$value[1],
+    worst_p = worst$p_severe[1],
+    worst_delta_pp = worst$delta_pp[1],
+    swing_pp = best$delta_pp[1] - worst$delta_pp[1],
+    stringsAsFactors = FALSE
+  )
+}) %>% dplyr::arrange(dplyr::desc(abs(swing_pp)))
+
+cat("\n================ WHAT-IF SUMMARY (top features) ================\n")
+print(whatif_summary)
+```
+
+# UNIVARIATE HYPOTHESIS TESTING HELPERS (t-test / Wilcoxon / prop-test / chi-square)
+```{r}
+# What: Provide a single standardized pipeline to test association between each predictor and SevereBinary.
+# Why: Matches STAT 544 “statistics report” expectations: t-tests for numeric vars, two-proportion tests for
+#      binary predictors, and chi-square independence tests for categorical predictors.
+
+library(dplyr)
+library(purrr)
+library(broom)
+library(tibble)
+
+# --- Effect sizes ---
+cohen_d <- function(x, g) {
+  # x numeric; g factor with levels c("Other","Severe/Fatal")
+  x0 <- x[g == "Other"]; x1 <- x[g == "Severe/Fatal"]
+  x0 <- x0[is.finite(x0)]; x1 <- x1[is.finite(x1)]
+  if (length(x0) < 2 || length(x1) < 2) return(NA_real_)
+  s0 <- sd(x0); s1 <- sd(x1)
+  sp <- sqrt(((length(x0)-1)*s0^2 + (length(x1)-1)*s1^2) / (length(x0)+length(x1)-2))
+  if (!is.finite(sp) || sp == 0) return(NA_real_)
+  (mean(x1) - mean(x0)) / sp
+}
+
+cramers_v <- function(tab, chi2_stat) {
+  n <- sum(tab)
+  r <- nrow(tab); c <- ncol(tab)
+  if (n == 0 || min(r-1, c-1) <= 0) return(NA_real_)
+  sqrt(as.numeric(chi2_stat) / (n * min(r-1, c-1)))
+}
+
+# --- Main per-variable test ---
+run_univariate_test <- function(data, var,
+                                outcome = "SevereBinary",
+                                alpha = 0.05,
+                                max_levels = 60,
+                                chisq_B = 2000) {
+  if (!all(c(var, outcome) %in% names(data))) return(NULL)
+
+  df <- data %>%
+    dplyr::select(all_of(c(var, outcome))) %>%
+    dplyr::filter(!is.na(.data[[outcome]]))
+
+  # Ensure outcome levels
+  df[[outcome]] <- factor(df[[outcome]], levels = c("Other", "Severe/Fatal"))
+  df <- df %>% dplyr::filter(!is.na(.data[[outcome]]))
+
+  x <- df[[var]]
+
+  # Treat numeric 0/1 (or 2 unique values) as categorical
+  if (is.numeric(x) || is.integer(x)) {
+    ux <- unique(x[is.finite(x)])
+    if (length(ux) <= 2) x <- as.factor(x)
+  }
+
+  # -------------------------
+  # NUMERIC predictor: t-test + Wilcoxon
+  # -------------------------
+  if (is.numeric(x) || is.integer(x)) {
+    df2 <- df %>% mutate(x = as.numeric(.data[[var]])) %>% filter(is.finite(x))
+    if (nrow(df2) < 10) return(tibble(
+      variable = var, type = "numeric", n_used = nrow(df2),
+      test = "SKIP (too few non-missing)", statistic = NA_real_,
+      p_value = NA_real_, effect = NA_real_, effect_label = NA_character_
+    ))
+
+    # Welch t-test (default; robust)
+    tt_welch <- tryCatch(t.test(x ~ .data[[outcome]], data = df2, var.equal = FALSE), error = function(e) NULL)
+    # Student t-test (equal variance) explicitly shown for the requirement
+    tt_student <- tryCatch(t.test(x ~ .data[[outcome]], data = df2, var.equal = TRUE), error = function(e) NULL)
+
+    # Wilcoxon as nonparametric backup for skew / non-normal settings (notes include Wilcoxon) 
+    wt <- tryCatch(wilcox.test(x ~ .data[[outcome]], data = df2, exact = FALSE), error = function(e) NULL)
+
+    m_other <- mean(df2$x[df2[[outcome]] == "Other"], na.rm = TRUE)
+    m_sev   <- mean(df2$x[df2[[outcome]] == "Severe/Fatal"], na.rm = TRUE)
+    d <- cohen_d(df2$x, df2[[outcome]])
+
+    tibble(
+      variable = var,
+      type = "numeric",
+      n_used = nrow(df2),
+
+      # Report BOTH (prof wants t-tests). Use Welch p as primary unless we want to force Student.
+      test = "t-test (Welch) + t-test (Student) + Wilcoxon",
+      statistic = if (!is.null(tt_welch)) unname(tt_welch$statistic) else NA_real_,
+      p_value = if (!is.null(tt_welch)) tt_welch$p.value else NA_real_,
+
+      p_value_student = if (!is.null(tt_student)) tt_student$p.value else NA_real_,
+      p_value_wilcox  = if (!is.null(wt)) wt$p.value else NA_real_,
+
+      mean_other = m_other,
+      mean_severe = m_sev,
+      mean_diff = m_sev - m_other,
+      effect = d,
+      effect_label = "Cohen_d (Severe - Other)"
+    )
+  }
+
+  # -------------------------
+  # CATEGORICAL predictor: prop-test for 2 levels, chi-square for 2+ levels
+  # -------------------------
+  x <- as.character(x)
+  x[x == ""] <- NA_character_
+  df2 <- df %>% mutate(x = x) %>% filter(!is.na(x))
+
+  if (nrow(df2) < 10) return(tibble(
+    variable = var, type = "categorical", n_used = nrow(df2),
+    test = "SKIP (too few non-missing)", statistic = NA_real_,
+    p_value = NA_real_, effect = NA_real_, effect_label = NA_character_
+  ))
+
+  # Trim extreme high-cardinality (keeps runtime sane; still “as many as we can”)
+  k <- length(unique(df2$x))
+  if (k > max_levels) {
+    return(tibble(
+      variable = var, type = "categorical", n_used = nrow(df2),
+      test = paste0("SKIP (high cardinality: ", k, " levels > ", max_levels, ")"),
+      statistic = NA_real_, p_value = NA_real_, effect = NA_real_, effect_label = NA_character_
+    ))
+  }
+
+  tab <- table(df2$x, df2[[outcome]])
+
+  # If exactly 2 levels -> Two-proportion test (matches notes)
+  if (nrow(tab) == 2) {
+    x_succ <- tab[, "Severe/Fatal"]
+    n_tot  <- rowSums(tab)
+    pt <- suppressWarnings(prop.test(x = x_succ, n = n_tot, correct = FALSE))
+
+    p1 <- x_succ[1] / n_tot[1]
+    p2 <- x_succ[2] / n_tot[2]
+    diff <- p1 - p2
+
+    # For effect size: risk difference (p1-p2) and also Cramer's V for 2x2
+    v <- cramers_v(tab, pt$statistic)
+
+    tibble(
+      variable = var,
+      type = "categorical (2 levels)",
+      n_used = sum(tab),
+      test = "Two-proportion test (prop.test) (≈ Z-test) + 2x2 chi-square equivalent",
+      statistic = unname(pt$statistic),
+      p_value = pt$p.value,
+      level1 = rownames(tab)[1],
+      level2 = rownames(tab)[2],
+      p_severe_level1 = p1,
+      p_severe_level2 = p2,
+      risk_diff = diff,
+      effect = v,
+      effect_label = "CramersV (2x2)"
+    )
+  } else {
+    # 2+ levels -> Chi-square independence test
+    cs <- suppressWarnings(chisq.test(tab))
+    use_sim <- any(cs$expected < 5)
+    cs2 <- if (use_sim) suppressWarnings(chisq.test(tab, simulate.p.value = TRUE, B = chisq_B)) else cs
+    v <- cramers_v(tab, cs2$statistic)
+
+    tibble(
+      variable = var,
+      type = paste0("categorical (", nrow(tab), " levels)"),
+      n_used = sum(tab),
+      test = if (use_sim) paste0("Chi-square independence (sim p, B=", chisq_B, ")") else "Chi-square independence",
+      statistic = unname(cs2$statistic),
+      p_value = cs2$p.value,
+      df = unname(cs2$parameter),
+      effect = v,
+      effect_label = "CramersV"
+    )
+  }
+}
+
+run_univariate_suite <- function(data, vars, outcome = "SevereBinary") {
+  res <- purrr::map_dfr(vars, ~ run_univariate_test(data, .x, outcome = outcome))
+  if (nrow(res) == 0) return(res)
+  res %>%
+    mutate(p_adj_fdr = p.adjust(p_value, method = "BH")) %>%
+    arrange(p_adj_fdr, p_value)
+}
+```
+
+# UNIVARIATE TEST BATTERY: Selected features + (optional) all candidate predictors
+```{r}
+# What: Run hypothesis tests for the LASSO-selected base variables, then optionally for all candidate predictors.
+# Why: Professor wants hypothesis tests for as many variables as possible + explicit t-tests where applicable.
+
+if (!exists("switrs_reduced")) stop("switrs_reduced not found. Run our cleaning/feature engineering first.")
+if (!("SevereBinary" %in% names(switrs_reduced))) stop("SevereBinary not found in switrs_reduced.")
+
+# --- A) Tests on SELECTED FEATURES (from our glmnet feature selection summary) ---
+# feature_selection_summary chunk created: selected_vars (with column base_var)
+if (exists("selected_vars") && "base_var" %in% names(selected_vars)) {
+  selected_base_vars <- unique(selected_vars$base_var)
+} else if (exists("train_set")) {
+  # fallback: if selected_vars isn't available, at least test what’s in the model
+  selected_base_vars <- setdiff(names(train_set), c("SevereBinary"))
+} else {
+  stop("Neither selected_vars nor train_set exists. Run glmnet feature selection (or baseline model) first.")
+}
+
+# Remove anything outcome/leakage-ish just in case
+if (exists("leakage_vars")) selected_base_vars <- setdiff(selected_base_vars, leakage_vars)
+selected_base_vars <- intersect(selected_base_vars, names(switrs_reduced))
+
+cat("Selected base variables to test:", length(selected_base_vars), "\n")
+
+tests_selected <- run_univariate_suite(switrs_reduced, selected_base_vars, outcome = "SevereBinary")
+
+cat("\nTop 30 (FDR-adjusted) significant selected variables:\n")
+print(head(tests_selected, 30))
+
+# --- B) Optional: tests on ALL candidate predictors we considered ---
+# Uses our candidate_predictors object from baseline modeling chunk if present
+if (exists("candidate_predictors")) {
+  all_vars <- candidate_predictors
+  if (exists("leakage_vars")) all_vars <- setdiff(all_vars, leakage_vars)
+  all_vars <- intersect(all_vars, names(switrs_reduced))
+
+  cat("\nAll candidate variables to test:", length(all_vars), "\n")
+  tests_all <- run_univariate_suite(switrs_reduced, all_vars, outcome = "SevereBinary")
+
+  cat("\nTop 30 (FDR-adjusted) significant variables among ALL candidates:\n")
+  print(head(tests_all, 30))
+} else {
+  cat("\nSkipping ALL-variable tests: candidate_predictors not found (run baseline modeling chunk first).\n")
+}
+```
+
+# Re-run tests after removing "Not Stated" categories (sensitivity check)
+```{r}
+# What: Remove "Not Stated" as a level before hypothesis testing.
+# Why: Provides cleaner inference on real categories; include as sensitivity analysis.
+
+switrs_noNS <- switrs_reduced %>%
+  dplyr::mutate(across(where(is.character), ~ dplyr::na_if(.x, "Not Stated"))) %>%
+  dplyr::mutate(across(where(is.factor), ~ {
+    x <- as.character(.x)
+    x[x == "Not Stated"] <- NA_character_
+    factor(x)
+  }))
+
+# Selected-vars rerun
+tests_selected_noNS <- run_univariate_suite(switrs_noNS, selected_base_vars, outcome = "SevereBinary")
+
+cat("\nTop 30 selected vars (NO Not Stated, FDR-adjusted):\n")
+print(head(tests_selected_noNS, 30))
+```
+
+# Print contingency tables for top categorical predictors (by FDR)
+```{r}
+# What: Show the raw counts used by chi-square / prop tests.
+# Why: Makes the hypothesis testing deliverable more “textbook” and auditable.
+
+print_top_tables <- function(test_tbl, data, top_k = 8) {
+  top_vars <- test_tbl %>%
+    dplyr::filter(grepl("^categorical", type)) %>%
+    dplyr::arrange(p_adj_fdr) %>%
+    dplyr::pull(variable) %>%
+    unique() %>%
+    head(top_k)
+
+  for (v in top_vars) {
+    cat("\n=============================\n")
+    cat("Contingency table for:", v, "\n")
+    cat("=============================\n")
+
+    # KEEP EXACTLY the same table construction you already used:
+    tab <- table(
+      normalize_not_stated(data[[v]], blank_to_notstated = TRUE),
+      data$SevereBinary,
+      useNA = "no"
+    )
+
+    # FIX ONLY THE LABELS (do NOT change counts/levels):
+    if (exists("legend_maps") && v %in% names(legend_maps) && exists("lookup_meaning")) {
+      rn <- rownames(tab)
+      rownames(tab) <- lookup_meaning(rn, legend_maps[[v]])
+    }
+
+    print(addmargins(tab))
+  }
+}
+
+if (exists("tests_selected") && nrow(tests_selected) > 0) {
+  print_top_tables(tests_selected, switrs_reduced, top_k = 8)
+}
 ```
 
 # Comparison and operating point metrics
