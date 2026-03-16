@@ -126,7 +126,7 @@ switrs_clean <- switrs_clean %>%
 rm(switrs)
 ```
 
-# Covert "UNKNOWN" road names to NA (special case)
+# Convert "UNKNOWN" road names to NA (special case)
 ```{r}
 # What: Convert literal UNKNOWN / Not Stated for roadway name fields to NA.
 # Why: For roadway names, these behave like missingness (not meaningful categories).
@@ -1783,6 +1783,7 @@ rate_tables[1:min(6, length(rate_tables))]
 
 # EDA: Decision-oriented severity rate plots (ordered, horizontal)
 ```{r}
+# EDA: Decision-oriented severity rate plots (ordered, horizontal)
 # What: Plot Severe/Fatal share by categorical variables as normalized stacked bars (horizontal).
 # Why: Client-ready comparisons: proportions highlight risk composition instead of just volume.
 #      Includes engineered flags + interaction terms to demonstrate merged-data value-add.
@@ -1847,7 +1848,13 @@ plot_severity_by_variable <- function(var_name,
     coord_flip() +
     scale_y_continuous(expand = c(0, 0), breaks = NULL, labels = NULL) +
     scale_x_discrete(labels = label_fun) +
-    scale_fill_discrete(drop = FALSE) +
+    scale_fill_manual(
+      values = c(
+        "Other" = "#A8D5BA",         # soft green
+        "Severe/Fatal" = "#1B5E20"   # forest green
+      ),
+      drop = FALSE
+    ) +
     labs(
       title = paste("Severity Distribution by", gsub("_", " ", var_name)),
       x = gsub("_", " ", var_name),
@@ -1896,6 +1903,7 @@ vars_to_plot <- intersect(
 purrr::walk(vars_to_plot, ~ plot_severity_by_variable(.x))
 ```
 
+
 # Correlation Check (numeric predictors)
 ```{r}
 # What: Correlation scan among numeric predictors.
@@ -1940,25 +1948,52 @@ if (length(num_vars) >= 2) {
 
 set.seed(544)
 
-# ---- 1) Candidate predictors (includes engineered flags + interactions if present) ----
+# ---- 1) Candidate predictors (deduplicated: keep one encoding per concept) ----
+# What: Build the predictor set for modeling while avoiding redundant parent/child variables.
+# Why: Prevent singularities and unstable coefficients from including both raw variables and
+#      deterministic recodes (for example DAY_OF_WEEK + weekend).
+
+if (!exists("leakage_vars")) leakage_vars <- character(0)
+
 candidate_predictors <- intersect(
   c(
-    # crash-level
-    "year","time_bucket","DAY_OF_WEEK","weekend",
-    "WEATHER_1","LIGHTING","ROAD_SURFACE",
-    "INTERSECTION","STATE_HWY_IND","TYPE_OF_COLLISION","PRIMARY_COLL_FACTOR",
-    "PCF_VIOL_CATEGORY","HIT_AND_RUN","ALCOHOL_INVOLVED",
-    "PEDESTRIAN_ACCIDENT","BICYCLE_ACCIDENT","MOTORCYCLE_ACCIDENT","TRUCK_ACCIDENT",
+    # crash-level: keep ONE version per concept
+    "year",
+    "weekend",            # keep; drop DAY_OF_WEEK
+    "night",              # keep; drop time_bucket
+    "is_rain",            # keep; drop WEATHER_1
+    "is_dark",            # keep; drop LIGHTING
+    "ROAD_SURFACE",
+    "INTERSECTION",
+    "STATE_HWY_IND",
+    "TYPE_OF_COLLISION",
+    "PRIMARY_COLL_FACTOR",
+    "pcf_dui",            # keep; drop PCF_VIOL_CATEGORY
+    "pcf_speed",          # keep; drop PCF_VIOL_CATEGORY
+    "HIT_AND_RUN",
+    "ALCOHOL_INVOLVED",
+    "is_ped",             # keep; drop PEDESTRIAN_ACCIDENT
+    "BICYCLE_ACCIDENT",
+    "MOTORCYCLE_ACCIDENT",
+    "TRUCK_ACCIDENT",
 
-    # engineered indicators + interactions
-    "night","pcf_dui","pcf_speed","is_rain","is_dark","is_ped",
-    "night_dui","rain_speed","ped_dark",
+    # engineered interactions (okay to keep once lower-order terms are present)
+    "night_dui",
+    "rain_speed",
+    "ped_dark",
 
     # party aggregates (if present in merged file)
-    "n_parties","any_party_alcohol","any_party_drug","any_party_at_fault","mean_party_age",
+    "n_parties",
+    "any_party_alcohol",
+    "any_party_drug",
+    "any_party_at_fault",
+    "mean_party_age",
 
     # victim aggregates (non-leakage only)
-    "n_victims","min_victim_age","mean_victim_age","max_victim_age"
+    "n_victims",
+    "min_victim_age",
+    "mean_victim_age",
+    "max_victim_age"
   ),
   names(switrs_reduced)
 )
@@ -1971,13 +2006,25 @@ if (length(intersect(candidate_predictors, leakage_vars)) > 0) {
   stop("Leakage detected: a harm/outcome variable is in candidate_predictors.")
 }
 
+# Optional guardrail: make sure redundant parent/raw versions are not sneaking back in
+forbidden_redundant <- c(
+  "DAY_OF_WEEK", "time_bucket", "WEATHER_1", "LIGHTING",
+  "PCF_VIOL_CATEGORY", "PEDESTRIAN_ACCIDENT"
+)
+if (length(intersect(candidate_predictors, forbidden_redundant)) > 0) {
+  stop("Redundant predictors detected in candidate_predictors. Remove parent/raw duplicates.")
+}
+
+cat("Predictors going into the model:\n")
+print(candidate_predictors)
+
 # ---- 2) Build modeling frame (NO phat in training data) ----
 model_df_clean <- switrs_reduced %>%
   dplyr::select(all_of(c("SevereBinary", candidate_predictors))) %>%
   dplyr::filter(!is.na(SevereBinary)) %>%
-  dplyr::mutate(SevereBinary = factor(SevereBinary, levels = c("Other","Severe/Fatal")))
+  dplyr::mutate(SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal")))
 
-# Types: chars->factor; explicit NA label for factors
+# Types: chars -> factor; explicit NA label for factors
 model_df_clean <- model_df_clean %>%
   dplyr::mutate(across(where(is.character), as.factor)) %>%
   dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
@@ -1994,13 +2041,15 @@ for (v in num_cols) {
 
 # Drop constant predictors
 is_constant <- sapply(model_df_clean %>% dplyr::select(-SevereBinary), function(x) {
-  ux <- unique(x); ux <- ux[!is.na(ux)]
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
   length(ux) <= 1
 })
 if (any(is_constant)) {
   cat("Dropping constant predictors:\n")
   print(names(is_constant)[is_constant])
-  model_df_clean <- model_df_clean %>% dplyr::select(SevereBinary, names(is_constant)[!is_constant])
+  model_df_clean <- model_df_clean %>%
+    dplyr::select(SevereBinary, names(is_constant)[!is_constant])
 }
 
 # ---- 3) Auto-detect *practical* separation and drop those predictors ----
@@ -2012,19 +2061,31 @@ pred_names <- setdiff(names(model_df_clean), "SevereBinary")
 is_perfect_separator <- function(x, y, min_level_n = 30) {
   if (is.character(x) || is.factor(x)) {
     tab <- table(x, y, useNA = "no")
-    # only consider levels with enough support
     lvl_n <- rowSums(tab)
     tab2 <- tab[lvl_n >= min_level_n, , drop = FALSE]
     if (nrow(tab2) == 0) return(FALSE)
-
-    # separation if any retained level has 0 in one outcome class
-    any(apply(tab2, 1, function(r) any(r == 0) && sum(r) > 0))
+    any(tab2[, "Other"] == 0 | tab2[, "Severe/Fatal"] == 0)
   } else if (is.numeric(x) || is.integer(x)) {
-    x1 <- x[y == "Severe/Fatal"]; x0 <- x[y == "Other"]
-    x1 <- x1[is.finite(x1)]; x0 <- x0[is.finite(x0)]
-    if (length(x1) < 30 || length(x0) < 30) return(FALSE)
-    (max(x0, na.rm = TRUE) < min(x1, na.rm = TRUE)) || (max(x1, na.rm = TRUE) < min(x0, na.rm = TRUE))
-  } else FALSE
+    ux <- sort(unique(x))
+    ux <- ux[!is.na(ux)]
+    if (length(ux) <= 1) return(FALSE)
+    qs <- unique(stats::quantile(x, probs = seq(0.1, 0.9, by = 0.1), na.rm = TRUE))
+    qs <- qs[!is.na(qs)]
+    for (cut in qs) {
+      left  <- y[x <= cut]
+      right <- y[x >  cut]
+      if (length(left)  >= min_level_n &&
+          length(right) >= min_level_n) {
+        if (all(left  == "Other")        || all(left  == "Severe/Fatal") ||
+            all(right == "Other")        || all(right == "Severe/Fatal")) {
+          return(TRUE)
+        }
+      }
+    }
+    FALSE
+  } else {
+    FALSE
+  }
 }
 
 sep_flags <- sapply(pred_names, function(v) is_perfect_separator(model_df_clean[[v]], y))
@@ -2033,10 +2094,11 @@ bad_vars <- names(sep_flags)[sep_flags]
 cat("Predictors dropped for practical separation:", length(bad_vars), "\n")
 if (length(bad_vars) > 0) print(bad_vars)
 
-model_df_clean2 <- model_df_clean %>% dplyr::select(-dplyr::all_of(bad_vars))
+model_df_clean2 <- model_df_clean %>%
+  dplyr::select(-dplyr::all_of(bad_vars))
 
-cat("Final predictors used:", ncol(model_df_clean2) - 1, "\n")
-cat("Rows used:", nrow(model_df_clean2), "\n")
+cat("\nFinal modeling columns:\n")
+print(names(model_df_clean2))
 
 # ---- 4) Train/Test split (stratified) ----
 idx_sev <- which(model_df_clean2$SevereBinary == "Severe/Fatal")
@@ -2114,77 +2176,134 @@ print(head(or_tbl, 20))
 ```{r}
 # What: Build a "typical crash" baseline row, then vary one predictor while holding others fixed.
 # Why: Turns the model into an actionable simulator: "if we change X, how does risk move?"
+#      This version uses glm_fit_final$xlevels so predict() never sees invalid factor levels.
 
 if (!exists("glm_fit_final")) stop("glm_fit_final not found. Run the baseline GLM chunk first.")
 if (!exists("train_set")) stop("train_set not found. Run the baseline GLM chunk first.")
 
-# --- Reference predictor frame (exact columns & factor levels used in the GLM) ---
+# --- Reference predictor frame (exact columns used in the GLM) ---
 model_vars <- setdiff(names(train_set), "SevereBinary")
 X_ref <- train_set[, model_vars, drop = FALSE]
 
-# --- Helpers to build a baseline profile ---
+# Factor levels known by the fitted model (source of truth for predict())
+model_xlev <- glm_fit_final$xlevels
+
+# --- Helpers ---
 mode_level <- function(x) {
   x <- x[!is.na(x)]
-  if (length(x) == 0) return(NA)
+  if (length(x) == 0) return(NA_character_)
   names(which.max(table(x)))[1]
 }
 
-baseline_row <- as.data.frame(lapply(X_ref, function(col) {
-  if (is.numeric(col) || is.integer(col)) {
-    as.numeric(stats::median(col, na.rm = TRUE))
-  } else {
-    mode_level(as.character(col))
+safe_predict_prob <- function(model, newdata) {
+  as.numeric(suppressWarnings(predict(model, newdata = newdata, type = "response")))
+}
+
+# --- Build a baseline profile that is guaranteed valid for the fitted GLM ---
+baseline_row <- as.data.frame(lapply(names(X_ref), function(v) {
+  col <- X_ref[[v]]
+
+  # Factor predictors: choose a valid level from model_xlev
+  if (v %in% names(model_xlev)) {
+    allowed <- model_xlev[[v]]
+    obs_mode <- mode_level(as.character(col))
+
+    if (is.na(obs_mode) || !(obs_mode %in% allowed)) {
+      freq <- sort(table(as.character(col)), decreasing = TRUE)
+      cand <- intersect(names(freq), allowed)
+      obs_mode <- if (length(cand) > 0) cand[1] else allowed[1]
+    }
+
+    return(factor(obs_mode, levels = allowed))
   }
+
+  # Numeric / integer predictors
+  if (is.integer(col)) {
+    return(as.integer(round(stats::median(col, na.rm = TRUE))))
+  }
+
+  if (is.numeric(col)) {
+    return(as.numeric(stats::median(col, na.rm = TRUE)))
+  }
+
+  # Character fallback
+  mode_level(as.character(col))
 }), stringsAsFactors = FALSE)
 
-# restore factor types/levels exactly
+names(baseline_row) <- names(X_ref)
+
+# Restore integer type where appropriate
 for (v in names(X_ref)) {
-  if (is.factor(X_ref[[v]])) {
-    baseline_row[[v]] <- factor(baseline_row[[v]], levels = levels(X_ref[[v]]))
-  } else if (is.integer(X_ref[[v]])) {
+  if (is.integer(X_ref[[v]]) && !(v %in% names(model_xlev))) {
     baseline_row[[v]] <- as.integer(round(as.numeric(baseline_row[[v]])))
-  } else if (is.numeric(X_ref[[v]])) {
-    baseline_row[[v]] <- as.numeric(baseline_row[[v]])
   }
 }
 
-# baseline probability
-p0 <- as.numeric(predict(glm_fit_final, newdata = baseline_row, type = "response"))
+# Baseline predicted probability
+p0 <- safe_predict_prob(glm_fit_final, baseline_row)
 
-# --- Main function: vary one variable, hold the rest fixed ---
-what_if <- function(var_name, values = NULL, model = glm_fit_final, base = baseline_row, ref = X_ref) {
+cat("Baseline predicted probability of Severe/Fatal crash:\n")
+print(round(p0, 4))
+
+# --- Main what-if function ---
+what_if <- function(var_name, values = NULL,
+                    model = glm_fit_final, base = baseline_row, ref = X_ref, xlev = model_xlev) {
+
   if (!var_name %in% names(base)) stop("Variable not in model predictors: ", var_name)
 
-  xref <- ref[[var_name]]
+  # Factor predictor: only use levels the GLM actually knows
+  if (var_name %in% names(xlev)) {
+    allowed <- xlev[[var_name]]
 
-  # default values if none supplied
-  if (is.null(values)) {
-    if (is.factor(xref) || is.character(xref)) {
-      values <- if (is.factor(xref)) levels(xref) else sort(unique(na.omit(xref)))
-    } else {
-      # numeric: show 10th/50th/90th percentiles
-      qs <- stats::quantile(xref, probs = c(0.10, 0.50, 0.90), na.rm = TRUE, names = FALSE)
-      values <- as.numeric(qs)
-    }
+    if (is.null(values)) values <- allowed
+    values <- as.character(values)
+    values <- values[values %in% allowed]
+
+    if (length(values) == 0) stop("No provided values are valid levels for ", var_name)
+
+    out <- lapply(values, function(val) {
+      nd <- base
+      nd[[var_name]] <- factor(val, levels = allowed)
+      p <- safe_predict_prob(model, nd)
+
+      data.frame(
+        variable = var_name,
+        value = val,
+        p_severe = p,
+        stringsAsFactors = FALSE
+      )
+    })
+
+    out <- dplyr::bind_rows(out) %>%
+      dplyr::mutate(
+        p_baseline = p0,
+        delta_pp = 100 * (p_severe - p_baseline),
+        baseline_value = as.character(base[[var_name]])
+      ) %>%
+      dplyr::arrange(dplyr::desc(p_severe))
+
+    return(out)
   }
 
-  # baseline value (for delta)
-  base_val <- as.character(base[[var_name]])
+  # Numeric / integer predictor
+  xref <- ref[[var_name]]
+
+  if (is.null(values)) {
+    qs <- stats::quantile(xref, probs = c(0.10, 0.50, 0.90), na.rm = TRUE, names = FALSE)
+    values <- as.numeric(qs)
+  }
 
   out <- lapply(values, function(val) {
     nd <- base
 
-    if (is.factor(xref)) {
-      nd[[var_name]] <- factor(as.character(val), levels = levels(xref))
-    } else if (is.integer(xref)) {
+    if (is.integer(xref)) {
       nd[[var_name]] <- as.integer(val)
-    } else if (is.numeric(xref)) {
-      nd[[var_name]] <- as.numeric(val)
     } else {
-      nd[[var_name]] <- as.character(val)
+      nd[[var_name]] <- as.numeric(val)
     }
 
-    p <- as.numeric(predict(model, newdata = nd, type = "response"))
+    p <- safe_predict_prob(model, nd)
+
     data.frame(
       variable = var_name,
       value = as.character(val),
@@ -2193,31 +2312,76 @@ what_if <- function(var_name, values = NULL, model = glm_fit_final, base = basel
     )
   })
 
-  out <- dplyr::bind_rows(out) %>%
+  dplyr::bind_rows(out) %>%
     dplyr::mutate(
       p_baseline = p0,
       delta_pp = 100 * (p_severe - p_baseline),
-      baseline_value = base_val
+      baseline_value = as.character(base[[var_name]])
     ) %>%
     dplyr::arrange(dplyr::desc(p_severe))
-
-  out
 }
 
-# ---- Example 1 (recommended): weekend what-if ----
+# --- Example what-if tables using variables that are actually in the GLM ---
+whatif_results <- list()
+
 if ("weekend" %in% names(baseline_row)) {
-  wk_vals <- intersect(c("Weekday","Weekend"), levels(X_ref$weekend))
-  what_if_weekend <- what_if("weekend", values = wk_vals)
-  print(what_if_weekend)
-} else {
-  cat("weekend not in model predictors.\n")
+  vals <- intersect(c("Weekday", "Weekend"), model_xlev$weekend)
+  whatif_results$weekend <- what_if("weekend", vals)
 }
 
-what_if("LIGHTING", c("A","C","D","E","Not Stated"))
-what_if("pcf_speed", c("No","Yes"))
-what_if("WEATHER_1")
-what_if("PCF_VIOL_CATEGORY")
-what_if("time_bucket")
+if ("night" %in% names(baseline_row)) {
+  vals <- intersect(c("No", "Yes"), model_xlev$night)
+  whatif_results$night <- what_if("night", vals)
+}
+
+if ("is_dark" %in% names(baseline_row)) {
+  vals <- intersect(c("No", "Yes"), model_xlev$is_dark)
+  whatif_results$is_dark <- what_if("is_dark", vals)
+}
+
+if ("is_rain" %in% names(baseline_row)) {
+  vals <- intersect(c("No", "Yes"), model_xlev$is_rain)
+  whatif_results$is_rain <- what_if("is_rain", vals)
+}
+
+if ("pcf_dui" %in% names(baseline_row)) {
+  vals <- intersect(c("No", "Yes"), model_xlev$pcf_dui)
+  whatif_results$pcf_dui <- what_if("pcf_dui", vals)
+}
+
+if ("pcf_speed" %in% names(baseline_row)) {
+  vals <- intersect(c("No", "Yes"), model_xlev$pcf_speed)
+  whatif_results$pcf_speed <- what_if("pcf_speed", vals)
+}
+
+if ("is_ped" %in% names(baseline_row)) {
+  vals <- intersect(c("No", "Yes"), model_xlev$is_ped)
+  whatif_results$is_ped <- what_if("is_ped", vals)
+}
+
+if ("HIT_AND_RUN" %in% names(baseline_row)) {
+  vals <- intersect(c("N", "M", "F", "Not Stated"), model_xlev$HIT_AND_RUN)
+  whatif_results$HIT_AND_RUN <- what_if("HIT_AND_RUN", vals)
+}
+
+if ("ROAD_SURFACE" %in% names(baseline_row)) {
+  vals <- model_xlev$ROAD_SURFACE
+  whatif_results$ROAD_SURFACE <- what_if("ROAD_SURFACE", vals)
+}
+
+if ("TYPE_OF_COLLISION" %in% names(baseline_row)) {
+  vals <- model_xlev$TYPE_OF_COLLISION
+  whatif_results$TYPE_OF_COLLISION <- what_if("TYPE_OF_COLLISION", vals)
+}
+
+# Print all result tables
+cat("\n================ WHAT-IF RESULTS (GLM) ================\n")
+for (nm in names(whatif_results)) {
+  cat("\n------------------------------------------------------\n")
+  cat("Variable:", nm, "\n")
+  cat("------------------------------------------------------\n")
+  print(whatif_results[[nm]])
+}
 ```
 
 # Penalized logistic regression: GLMNET model
@@ -2239,18 +2403,21 @@ if (!exists("train_set") || !exists("test_set")) {
 if (!("SevereBinary" %in% names(train_set))) stop("SevereBinary not found in train_set.")
 
 # ---- 2) Build aligned model matrices (one-hot encode factors consistently) ----
-# Add split flag, bind, encode once, then split back
 train_set$.split <- "train"
 test_set$.split  <- "test"
 combo <- dplyr::bind_rows(train_set, test_set)
 
-# model.matrix will create consistent columns because it's run once on the combined data
-X_all <- model.matrix(SevereBinary ~ . , data = combo)[, -1, drop = FALSE]
-
-# Split rows back
+# Save row indices BEFORE dropping .split
 train_idx <- combo$.split == "train"
 test_idx  <- combo$.split == "test"
 
+# Remove split flag so it cannot leak into predictors
+combo_mm <- combo %>% dplyr::select(-.split)
+
+# model.matrix now uses the same encoding for train/test without leakage
+X_all <- model.matrix(SevereBinary ~ ., data = combo_mm)[, -1, drop = FALSE]
+
+# Split rows back
 x_train <- X_all[train_idx, , drop = FALSE]
 x_test  <- X_all[test_idx,  , drop = FALSE]
 
@@ -2260,8 +2427,8 @@ y_test  <- as.integer(combo$SevereBinary[test_idx]  == "Severe/Fatal")
 
 # Cleanup temp columns
 train_set$.split <- NULL
-test_set$.split <- NULL
-combo$.split <- NULL
+test_set$.split  <- NULL
+combo$.split     <- NULL
 
 # ---- 3) Cross-validated glmnet ----
 # alpha = 1 (LASSO). ridge: 0. elastic net: between 0 and 1.
@@ -2356,7 +2523,7 @@ cat("\nSelected base variables (ranked by how many active dummy terms they contr
 print(selected_vars)
 ```
 
-# What-if for the most important (LASSO selected) features
+# GLM what-if analysis for LASSO-selected features”
 ```{r}
 # (3) WHAT-IF ANALYSIS (FIXED): uses glm_fit_final$xlevels so predict() never sees "new levels"
 if (!exists("glm_fit_final")) stop("glm_fit_final not found. Run baseline GLM chunk first.")
@@ -2598,13 +2765,16 @@ run_univariate_test <- function(data, var,
       p_value = NA_real_, effect = NA_real_, effect_label = NA_character_
     ))
 
+    df2$g <- df2[[outcome]]
+    
     # Welch t-test (default; robust)
-    tt_welch <- tryCatch(t.test(x ~ .data[[outcome]], data = df2, var.equal = FALSE), error = function(e) NULL)
+    tt_welch <- tryCatch(t.test(x ~ g, data = df2, var.equal = FALSE), error = function(e) NULL)
+    
     # Student t-test (equal variance) explicitly shown for the requirement
-    tt_student <- tryCatch(t.test(x ~ .data[[outcome]], data = df2, var.equal = TRUE), error = function(e) NULL)
-
+    tt_student <- tryCatch(t.test(x ~ g, data = df2, var.equal = TRUE), error = function(e) NULL)
+    
     # Wilcoxon as nonparametric backup for skew / non-normal settings (notes include Wilcoxon) 
-    wt <- tryCatch(wilcox.test(x ~ .data[[outcome]], data = df2, exact = FALSE), error = function(e) NULL)
+    wt <- tryCatch(wilcox.test(x ~ g, data = df2, exact = FALSE), error = function(e) NULL)
 
     m_other <- mean(df2$x[df2[[outcome]] == "Other"], na.rm = TRUE)
     m_sev   <- mean(df2$x[df2[[outcome]] == "Severe/Fatal"], na.rm = TRUE)
@@ -2952,7 +3122,7 @@ if (length(interaction_vars) > 0) {
       dplyr::group_by(g) %>%
       dplyr::summarise(rate = 100*mean(SevereBinary=="Severe/Fatal"), n = dplyr::n(), .groups="drop")
     yes_row <- df[df$g=="Yes", ]
-    if (nrow(yes_row) == 0) return(NULL)
+    if (nrow(yes_row) == 0) return(NA_character_)
 
     label <- dplyr::recode(v,
       night_dui  = "Night × DUI proxy",
@@ -3048,3 +3218,9 @@ cands <- cands[!leak_like]
 cat("Candidate merged-only predictors to consider next (non-leakage):\n")
 print(head(cands, 50))
 ```
+
+random forest and check the sensitivity and accuracy again
+check if the days are included with weekend and weekday 
+random sampling frm not severe and then do more testing
+after getting better sensitivity use odds ratios
+priority based on odds ratio (for policy)
