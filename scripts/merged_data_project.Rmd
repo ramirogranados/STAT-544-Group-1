@@ -1,9 +1,9 @@
 ---
 title: "STAT 544 - SWITRS Crash Severity Notebook (Rebuilt for Correctly Merged Data)"
 output:
-  html_document: default
-  pdf_document: default
   html_notebook: default
+  pdf_document: default
+  html_document: default
 ---
 
 # Package Chunk
@@ -2385,10 +2385,10 @@ if (length(num_vars) >= 2) {
 
 # Baseline modeling dataset
 ```{r}
-# BASELINE MODEL (LEAK-SAFE PIPELINE): split first, then learn preprocessing on train only
-# What: Construct modeling frame, split train/test, learn preprocessing only on train,
-#       fit GLM, and report AUC + ORs.
-# Why: Avoids leakage from imputing / filtering / screening on the full dataset.
+# BASELINE MODEL: full-data imputation first, THEN stratified train/test split
+# What: Construct modeling frame, impute numeric predictors on the full modeling dataset,
+#       then split into train/test, fit GLM, and report AUC + ORs.
+# Why: This version matches the requested workflow where imputation occurs before the split.
 
 set.seed(544)
 
@@ -2441,6 +2441,7 @@ candidate_predictors <- intersect(
   ),
   names(switrs_reduced)
 )
+
 candidate_predictors <- setdiff(candidate_predictors, leakage_vars)
 
 if (length(intersect(candidate_predictors, leakage_vars)) > 0) {
@@ -2475,7 +2476,25 @@ model_df_raw <- model_df_raw %>%
   dplyr::mutate(across(where(is.character), as.factor)) %>%
   dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
 
-# ---- 3) Stratified train/test split FIRST ----
+# ---- 3) Full-data numeric imputation BEFORE split ----
+num_cols <- names(model_df_raw)[sapply(model_df_raw, is.numeric)]
+num_cols <- setdiff(num_cols, "SevereBinary")
+
+full_medians <- setNames(vector("list", length(num_cols)), num_cols)
+
+for (v in num_cols) {
+  miss_name <- paste0(v, "_miss")
+
+  model_df_raw[[miss_name]] <- as.integer(is.na(model_df_raw[[v]]))
+
+  med <- suppressWarnings(median(model_df_raw[[v]], na.rm = TRUE))
+  if (is.na(med)) med <- 0
+
+  full_medians[[v]] <- med
+  model_df_raw[[v]][is.na(model_df_raw[[v]])] <- med
+}
+
+# ---- 4) Stratified train/test split AFTER imputation ----
 idx_sev <- which(model_df_raw$SevereBinary == "Severe/Fatal")
 idx_oth <- which(model_df_raw$SevereBinary == "Other")
 test_frac <- 0.30
@@ -2489,27 +2508,6 @@ test_set_raw  <- model_df_raw[test_idx, , drop = FALSE]
 train_set_raw <- model_df_raw[-test_idx, , drop = FALSE]
 
 cat("Train raw n =", nrow(train_set_raw), " | Test raw n =", nrow(test_set_raw), "\n")
-
-# ---- 4) Train-learned numeric imputation ----
-num_cols <- names(train_set_raw)[sapply(train_set_raw, is.numeric)]
-num_cols <- setdiff(num_cols, "SevereBinary")
-
-train_medians <- setNames(vector("list", length(num_cols)), num_cols)
-
-for (v in num_cols) {
-  miss_name <- paste0(v, "_miss")
-
-  train_set_raw[[miss_name]] <- as.integer(is.na(train_set_raw[[v]]))
-  test_set_raw[[miss_name]]  <- as.integer(is.na(test_set_raw[[v]]))
-
-  med <- suppressWarnings(median(train_set_raw[[v]], na.rm = TRUE))
-  if (is.na(med)) med <- 0
-
-  train_medians[[v]] <- med
-
-  train_set_raw[[v]][is.na(train_set_raw[[v]])] <- med
-  test_set_raw[[v]][is.na(test_set_raw[[v]])]   <- med
-}
 
 # ---- 5) Drop constant predictors based on TRAIN only ----
 is_constant_train <- sapply(train_set_raw %>% dplyr::select(-SevereBinary), function(x) {
