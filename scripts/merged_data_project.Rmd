@@ -3524,6 +3524,133 @@ if (exists("tests_selected") && nrow(tests_selected) > 0) {
 }
 ```
 
+# TARGETED SCENARIO MODEL: interaction-focused policy model
+```{r}
+# What: Fit a lean GLM using high-impact interaction variables + required parent effects.
+# Why: Directly answers "which specific conditions should we target?"
+
+set.seed(544)
+
+# ---- 1) Define predictors ----
+scenario_predictors <- intersect(
+  c(
+    # --- REQUIRED MAIN EFFECTS (parents of interactions) ---
+    "day_group",        # parent of friday_night
+    "night",
+    "is_ped",
+    "INTERSECTION",
+    "STATE_HWY_IND",
+    "lighting_group",
+    "pcf_dui",
+
+    # --- INTERACTIONS (your focus) ---
+    "friday_night",
+    "ped_dark",
+    "intersection_ped",
+    "highway_night",
+    "night_dui"
+  ),
+  names(switrs_reduced)
+)
+
+cat("Scenario model predictors:\n")
+print(scenario_predictors)
+
+# ---- 2) Build modeling dataset ----
+scenario_df <- switrs_reduced %>%
+  dplyr::select(all_of(c("SevereBinary", scenario_predictors))) %>%
+  dplyr::filter(!is.na(SevereBinary)) %>%
+  dplyr::mutate(
+    SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
+  ) %>%
+  dplyr::mutate(across(where(is.character), as.factor)) %>%
+  dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
+
+# ---- 3) Stratified split (same logic as baseline) ----
+idx_sev <- which(scenario_df$SevereBinary == "Severe/Fatal")
+idx_oth <- which(scenario_df$SevereBinary == "Other")
+
+test_frac <- 0.30
+
+test_idx <- c(
+  sample(idx_sev, size = floor(length(idx_sev) * test_frac)),
+  sample(idx_oth, size = floor(length(idx_oth) * test_frac))
+)
+
+test_scen  <- scenario_df[test_idx, , drop = FALSE]
+train_scen <- scenario_df[-test_idx, , drop = FALSE]
+
+cat("Train n =", nrow(train_scen), "| Test n =", nrow(test_scen), "\n")
+
+# ---- 4) Train-only numeric imputation (safe) ----
+num_cols <- names(train_scen)[sapply(train_scen, is.numeric)]
+num_cols <- setdiff(num_cols, "SevereBinary")
+
+for (v in num_cols) {
+  miss_name <- paste0(v, "_miss")
+
+  train_scen[[miss_name]] <- as.integer(is.na(train_scen[[v]]))
+  test_scen[[miss_name]]  <- as.integer(is.na(test_scen[[v]]))
+
+  med <- median(train_scen[[v]], na.rm = TRUE)
+  if (is.na(med)) med <- 0
+
+  train_scen[[v]][is.na(train_scen[[v]])] <- med
+  test_scen[[v]][is.na(test_scen[[v]])]   <- med
+}
+
+# ---- 5) Fit GLM ----
+glm_scenario <- glm(
+  SevereBinary ~ .,
+  data = train_scen,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+cat("Scenario model converged? ", glm_scenario$converged, "\n", sep = "")
+
+# ---- 6) Evaluate ----
+test_phat_scen <- predict(glm_scenario, newdata = test_scen, type = "response")
+test_y_scen <- test_scen$SevereBinary
+
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+roc_obj <- pROC::roc(test_y_scen, test_phat_scen, levels = c("Other","Severe/Fatal"), quiet = TRUE)
+
+cat("Scenario model TEST AUC:", round(pROC::auc(roc_obj), 4), "\n")
+
+# Confusion matrices
+pred_05 <- factor(ifelse(test_phat_scen >= 0.5, "Severe/Fatal", "Other"), levels = levels(test_y_scen))
+cat("\nConfusion matrix (0.50 cutoff):\n")
+print(table(Pred = pred_05, Truth = test_y_scen))
+
+prev <- mean(train_scen$SevereBinary == "Severe/Fatal")
+pred_prev <- factor(ifelse(test_phat_scen >= prev, "Severe/Fatal", "Other"), levels = levels(test_y_scen))
+cat("\nConfusion matrix (prevalence cutoff):\n")
+print(table(Pred = pred_prev, Truth = test_y_scen))
+
+# ---- 7) Odds ratios ----
+coefs <- summary(glm_scenario)$coefficients
+
+or_tbl_scen <- data.frame(
+  term = rownames(coefs),
+  estimate = coefs[, "Estimate"],
+  std.error = coefs[, "Std. Error"],
+  p.value = coefs[, "Pr(>|z|)"],
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::filter(term != "(Intercept)") %>%
+  dplyr::mutate(
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error)
+  ) %>%
+  dplyr::arrange(dplyr::desc(abs(estimate)))
+
+cat("\nTop scenario-model odds ratios:\n")
+print(head(or_tbl_scen, 15))
+```
+
+
 # Comparison and operating point metrics
 ```{r model_compare, message=FALSE, warning=FALSE}
 # MODEL COMPARISON: GLM baseline vs glmnet (AUC + threshold metrics)
@@ -4119,14 +4246,14 @@ cat("Candidate merged-only predictors to consider next (non-leakage):\n")
 print(head(cands, 50))
 ```
 
-Issues to fix:
+AFTER A NEW MODEL:
 random forest and check the sensitivity and accuracy again
 check if the days are included with weekend and weekday 
 undersampling: random sampling frm not severe and then do more testing
 after getting better sensitivity use odds ratios
 priority based on odds ratio (for policy)
 
-
+CURRENT:
 we need to make more specific and more intensive models and decide on where we're going to allocate resources
 need more specific hypothesis testing
   focus on specific days, locations, conditions, freeways, etc. (aka focus on subgroups)
