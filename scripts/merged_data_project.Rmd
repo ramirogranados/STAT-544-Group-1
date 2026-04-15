@@ -1,9 +1,9 @@
 ---
 title: "STAT 544 - SWITRS Crash Severity Notebook (Rebuilt for Correctly Merged Data)"
 output:
-  html_notebook: default
-  pdf_document: default
   html_document: default
+  pdf_document: default
+  html_notebook: default
 ---
 
 # Package Chunk
@@ -2383,14 +2383,53 @@ if (length(num_vars) >= 2) {
 }
 ```
 
-# Baseline modeling dataset
-```{r}
-# BASELINE MODEL: full-data imputation first, THEN stratified train/test split
-# What: Construct modeling frame, impute numeric predictors on the full modeling dataset,
-#       then split into train/test, fit GLM, and report AUC + ORs.
-# Why: This version matches the requested workflow where imputation occurs before the split.
+# Shared train/test split
+```{r shared_train_test_split, message=FALSE, warning=FALSE}
+# What: Create one shared stratified train/test split for all downstream models.
+# Why: Ensures every model is evaluated on the exact same rows.
 
 set.seed(544)
+
+if (!all(c("CASE_ID", "SevereBinary") %in% names(switrs_reduced))) {
+  stop("Need CASE_ID and SevereBinary in switrs_reduced before creating the shared split.")
+}
+
+split_frame <- switrs_reduced %>%
+  dplyr::select(CASE_ID, SevereBinary) %>%
+  dplyr::filter(!is.na(CASE_ID), !is.na(SevereBinary)) %>%
+  dplyr::distinct(CASE_ID, .keep_all = TRUE) %>%
+  dplyr::mutate(
+    SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
+  )
+
+test_frac <- 0.30
+
+idx_sev <- which(split_frame$SevereBinary == "Severe/Fatal")
+idx_oth <- which(split_frame$SevereBinary == "Other")
+
+shared_test_idx <- c(
+  sample(idx_sev, size = floor(length(idx_sev) * test_frac)),
+  sample(idx_oth, size = floor(length(idx_oth) * test_frac))
+)
+
+test_case_ids  <- split_frame$CASE_ID[shared_test_idx]
+train_case_ids <- setdiff(split_frame$CASE_ID, test_case_ids)
+
+cat("Shared split created.\n")
+cat("Train crashes =", length(train_case_ids), "| Test crashes =", length(test_case_ids), "\n")
+cat("Shared test fraction =", round(length(test_case_ids) / nrow(split_frame), 4), "\n")
+```
+
+# Baseline GLM modeling dataset
+```{r}
+# What: Construct the baseline GLM modeling frame, reuse the shared split,
+#       fit the model, and report AUC + ORs.
+# Why: Keeps a single split across the notebook and makes the baseline model
+#      clearly identifiable.
+
+set.seed(544)
+
+baseline_glm_name <- "Baseline GLM"
 
 # ---- 1) Candidate predictors (deduplicated: keep one encoding per concept) ----
 if (!exists("leakage_vars")) leakage_vars <- character(0)
@@ -2460,67 +2499,65 @@ if (length(intersect(candidate_predictors, forbidden_redundant)) > 0) {
   stop("Redundant predictors detected in candidate_predictors. Remove parent/raw duplicates.")
 }
 
-cat("Predictors going into the model:\n")
+cat(baseline_glm_name, "predictors:\n")
 print(candidate_predictors)
 
 # ---- 2) Build raw modeling frame ----
-model_df_raw <- switrs_reduced %>%
-  dplyr::select(all_of(c("SevereBinary", candidate_predictors))) %>%
+baseline_glm_df_raw <- switrs_reduced %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", candidate_predictors))) %>%
   dplyr::filter(!is.na(SevereBinary)) %>%
   dplyr::mutate(
     SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
   )
 
 # chars -> factor; explicit NA level for factors
-model_df_raw <- model_df_raw %>%
+baseline_glm_df_raw <- baseline_glm_df_raw %>%
   dplyr::mutate(across(where(is.character), as.factor)) %>%
   dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
 
 # ---- 3) Full-data numeric imputation BEFORE split ----
-num_cols <- names(model_df_raw)[sapply(model_df_raw, is.numeric)]
-num_cols <- setdiff(num_cols, "SevereBinary")
+num_cols <- names(baseline_glm_df_raw)[sapply(baseline_glm_df_raw, is.numeric)]
+num_cols <- setdiff(num_cols, c("CASE_ID", "SevereBinary"))
 
 full_medians <- setNames(vector("list", length(num_cols)), num_cols)
 
 for (v in num_cols) {
   miss_name <- paste0(v, "_miss")
 
-  model_df_raw[[miss_name]] <- as.integer(is.na(model_df_raw[[v]]))
+  baseline_glm_df_raw[[miss_name]] <- as.integer(is.na(baseline_glm_df_raw[[v]]))
 
-  med <- suppressWarnings(median(model_df_raw[[v]], na.rm = TRUE))
+  med <- suppressWarnings(median(baseline_glm_df_raw[[v]], na.rm = TRUE))
   if (is.na(med)) med <- 0
 
   full_medians[[v]] <- med
-  model_df_raw[[v]][is.na(model_df_raw[[v]])] <- med
+  baseline_glm_df_raw[[v]][is.na(baseline_glm_df_raw[[v]])] <- med
 }
 
-# ---- 4) Stratified train/test split AFTER imputation ----
-idx_sev <- which(model_df_raw$SevereBinary == "Severe/Fatal")
-idx_oth <- which(model_df_raw$SevereBinary == "Other")
-test_frac <- 0.30
+# ---- 4) Reuse the shared split ----
+if (!exists("train_case_ids") || !exists("test_case_ids")) {
+  stop("Shared split not found. Run the shared_train_test_split chunk first.")
+}
 
-test_idx <- c(
-  sample(idx_sev, size = floor(length(idx_sev) * test_frac)),
-  sample(idx_oth, size = floor(length(idx_oth) * test_frac))
-)
+train_set_raw <- baseline_glm_df_raw %>%
+  dplyr::filter(CASE_ID %in% train_case_ids)
 
-test_set_raw  <- model_df_raw[test_idx, , drop = FALSE]
-train_set_raw <- model_df_raw[-test_idx, , drop = FALSE]
+test_set_raw <- baseline_glm_df_raw %>%
+  dplyr::filter(CASE_ID %in% test_case_ids)
 
-cat("Train raw n =", nrow(train_set_raw), " | Test raw n =", nrow(test_set_raw), "\n")
+cat(baseline_glm_name, "raw split sizes: Train =", nrow(train_set_raw), "| Test =", nrow(test_set_raw), "\n")
 
 # ---- 5) Drop constant predictors based on TRAIN only ----
-is_constant_train <- sapply(train_set_raw %>% dplyr::select(-SevereBinary), function(x) {
+is_constant_train <- sapply(train_set_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
   ux <- unique(x)
   ux <- ux[!is.na(ux)]
   length(ux) <= 1
 })
 
 if (any(is_constant_train)) {
-  cat("Dropping train-constant predictors:\n")
+  cat("Dropping", baseline_glm_name, "train-constant predictors:\n")
   print(names(is_constant_train)[is_constant_train])
 
-  keep_cols <- c("SevereBinary", names(is_constant_train)[!is_constant_train])
+  keep_cols <- c("CASE_ID", "SevereBinary", names(is_constant_train)[!is_constant_train])
   train_set_raw <- train_set_raw %>% dplyr::select(all_of(keep_cols))
   test_set_raw  <- test_set_raw  %>% dplyr::select(all_of(keep_cols))
 }
@@ -2556,62 +2593,65 @@ is_perfect_separator <- function(x, y, min_level_n = 30) {
 }
 
 y_train <- train_set_raw$SevereBinary
-pred_names_train <- setdiff(names(train_set_raw), "SevereBinary")
+pred_names_train <- setdiff(names(train_set_raw), c("CASE_ID", "SevereBinary"))
 
 sep_flags <- sapply(pred_names_train, function(v) is_perfect_separator(train_set_raw[[v]], y_train))
 bad_vars <- names(sep_flags)[sep_flags]
 
-cat("Predictors dropped for practical separation (train only):", length(bad_vars), "\n")
+cat(baseline_glm_name, "predictors dropped for practical separation:", length(bad_vars), "\n")
 if (length(bad_vars) > 0) print(bad_vars)
 
 if (length(bad_vars) > 0) {
-  train_set <- train_set_raw %>% dplyr::select(-dplyr::all_of(bad_vars))
-  test_set  <- test_set_raw  %>% dplyr::select(-dplyr::all_of(bad_vars))
-} else {
-  train_set <- train_set_raw
-  test_set  <- test_set_raw
+  train_set_raw <- train_set_raw %>% dplyr::select(-dplyr::all_of(bad_vars))
+  test_set_raw  <- test_set_raw  %>% dplyr::select(-dplyr::all_of(bad_vars))
 }
 
-cat("\nFinal modeling columns:\n")
+# ---- 7) Final model matrices ----
+train_set <- train_set_raw %>% dplyr::select(-CASE_ID)
+test_set  <- test_set_raw  %>% dplyr::select(-CASE_ID)
+
+cat("\nFinal", baseline_glm_name, "columns:\n")
 print(names(train_set))
 
 # Keep a combined object only for downstream reference if needed
 model_df_clean2 <- dplyr::bind_rows(train_set, test_set)
 
-cat("Train n =", nrow(train_set), " | Test n =", nrow(test_set), "\n")
+cat(baseline_glm_name, "final split sizes: Train =", nrow(train_set), "| Test =", nrow(test_set), "\n")
 
-# ---- 7) Fit GLM (train only) ----
-glm_fit_final <- glm(
+# ---- 8) Fit GLM (train only) ----
+baseline_glm_fit <- glm(
   SevereBinary ~ .,
   data = train_set,
   family = binomial(),
   control = glm.control(maxit = 50)
 )
-glm_fit_final
 
-cat("GLM converged? ", glm_fit_final$converged, "\n", sep = "")
+glm_fit_final <- baseline_glm_fit
 
-# ---- 8) Predict + AUC + confusion matrix ----
-test_phat <- as.numeric(predict(glm_fit_final, newdata = test_set, type = "response"))
+cat(baseline_glm_name, "converged? ", baseline_glm_fit$converged, "\n", sep = "")
+
+# ---- 9) Predict + AUC + confusion matrix ----
+baseline_glm_test_phat <- as.numeric(predict(baseline_glm_fit, newdata = test_set, type = "response"))
+test_phat <- baseline_glm_test_phat
 test_y <- test_set$SevereBinary
 
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
 if (requireNamespace("pROC", quietly = TRUE)) {
-  roc_obj <- pROC::roc(test_y, test_phat, levels = c("Other","Severe/Fatal"), quiet = TRUE)
-  cat("TEST AUC:", round(as.numeric(pROC::auc(roc_obj)), 4), "\n")
+  roc_obj <- pROC::roc(test_y, baseline_glm_test_phat, levels = c("Other","Severe/Fatal"), quiet = TRUE)
+  cat(baseline_glm_name, "TEST AUC:", round(as.numeric(pROC::auc(roc_obj)), 4), "\n")
 }
 
-pred_05 <- factor(ifelse(test_phat >= 0.5, "Severe/Fatal", "Other"), levels = levels(test_y))
-cat("\nConfusion matrix (cutoff=0.50):\n")
+pred_05 <- factor(ifelse(baseline_glm_test_phat >= 0.5, "Severe/Fatal", "Other"), levels = levels(test_y))
+cat("\n", baseline_glm_name, "confusion matrix (cutoff=0.50):\n", sep = "")
 print(table(Pred = pred_05, Truth = test_y))
 
 prev <- mean(train_set$SevereBinary == "Severe/Fatal")
-pred_prev <- factor(ifelse(test_phat >= prev, "Severe/Fatal", "Other"), levels = levels(test_y))
-cat("\nConfusion matrix (cutoff=prevalence=", round(prev, 4), "):\n", sep = "")
+pred_prev <- factor(ifelse(baseline_glm_test_phat >= prev, "Severe/Fatal", "Other"), levels = levels(test_y))
+cat("\n", baseline_glm_name, "confusion matrix (cutoff=prevalence=", round(prev, 4), "):\n", sep = "")
 print(table(Pred = pred_prev, Truth = test_y))
 
-# ---- 9) Odds ratios (fast Wald CI) ----
-coefs <- summary(glm_fit_final)$coefficients
+# ---- 10) Odds ratios (fast Wald CI) ----
+coefs <- summary(baseline_glm_fit)$coefficients
 or_tbl <- data.frame(
   term = rownames(coefs),
   estimate = coefs[, "Estimate"],
@@ -2630,7 +2670,7 @@ or_tbl <- data.frame(
   dplyr::arrange(dplyr::desc(log_or)) %>%
   dplyr::select(term, OR, conf.low, conf.high, p.value)
 
-cat("\nTop 20 GLM odds ratios by |log(OR)| (FAST Wald CI, train fit):\n")
+cat("\nTop 20", baseline_glm_name, "odds ratios by |log(OR)| (FAST Wald CI, train fit):\n")
 print(head(or_tbl, 20))
 ```
 
@@ -2928,11 +2968,10 @@ for (nm in names(whatif_results)) {
 
 # Penalized logistic regression: GLMNET model
 ```{r glmnet_model, message=FALSE, warning=FALSE}
-# MODEL UPGRADE: Penalized Logistic Regression (glmnet)
-# What: Fit LASSO logistic regression with cross-validation using a consistent one-hot encoding
-#       across train and test sets.
-# Why:  model.matrix() must produce the same columns for train/test; building them separately can
-#       create mismatches when factor levels differ by split. This version guarantees alignment.
+# What: Fit the LASSO GLMNET model using the shared train/test split.
+# Why: Keeps model naming clear and ensures alignment with the baseline split.
+
+lasso_glmnet_name <- "LASSO GLMNET"
 
 # Install/load glmnet if needed
 if (!requireNamespace("glmnet", quietly = TRUE)) install.packages("glmnet")
@@ -2940,7 +2979,7 @@ library(glmnet)
 
 # ---- 1) Sanity checks ----
 if (!exists("train_set") || !exists("test_set")) {
-  stop("train_set/test_set not found. Run the baseline modeling chunk first.")
+  stop("train_set/test_set not found. Run the Baseline GLM chunk first.")
 }
 if (!("SevereBinary" %in% names(train_set))) stop("SevereBinary not found in train_set.")
 
@@ -2949,33 +2988,26 @@ train_set$.split <- "train"
 test_set$.split  <- "test"
 combo <- dplyr::bind_rows(train_set, test_set)
 
-# Save row indices BEFORE dropping .split
 train_idx <- combo$.split == "train"
 test_idx  <- combo$.split == "test"
 
-# Remove split flag so it cannot leak into predictors
 combo_mm <- combo %>% dplyr::select(-.split)
 
-# model.matrix now uses the same encoding for train/test without leakage
 X_all <- model.matrix(SevereBinary ~ ., data = combo_mm)[, -1, drop = FALSE]
 
-# Split rows back
 x_train <- X_all[train_idx, , drop = FALSE]
 x_test  <- X_all[test_idx,  , drop = FALSE]
 
-# Outcome as 0/1: Severe/Fatal = 1
 y_train <- as.integer(combo$SevereBinary[train_idx] == "Severe/Fatal")
 y_test  <- as.integer(combo$SevereBinary[test_idx]  == "Severe/Fatal")
 
-# Cleanup temp columns
 train_set$.split <- NULL
 test_set$.split  <- NULL
 combo$.split     <- NULL
 
 # ---- 3) Cross-validated glmnet ----
-# alpha = 1 (LASSO). ridge: 0. elastic net: between 0 and 1.
 set.seed(544)
-cv_fit <- cv.glmnet(
+lasso_glmnet_cv_fit <- cv.glmnet(
   x = x_train,
   y = y_train,
   family = "binomial",
@@ -2984,34 +3016,39 @@ cv_fit <- cv.glmnet(
   type.measure = "auc"
 )
 
-cat("Best lambda (min):", cv_fit$lambda.min, "\n")
-cat("1-SE lambda:", cv_fit$lambda.1se, "\n")
+cv_fit <- lasso_glmnet_cv_fit
 
-plot(cv_fit)
+cat(lasso_glmnet_name, "best lambda (min):", lasso_glmnet_cv_fit$lambda.min, "\n")
+cat(lasso_glmnet_name, "1-SE lambda:", lasso_glmnet_cv_fit$lambda.1se, "\n")
+
+plot(lasso_glmnet_cv_fit)
 
 # ---- 4) Predict on test + AUC ----
-p_test <- as.numeric(predict(cv_fit, newx = x_test, s = "lambda.1se", type = "response"))
+lasso_glmnet_test_phat <- as.numeric(
+  predict(lasso_glmnet_cv_fit, newx = x_test, s = "lambda.1se", type = "response")
+)
+p_test <- lasso_glmnet_test_phat
 
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
 auc_glmnet <- NA_real_
 if (requireNamespace("pROC", quietly = TRUE)) {
-  roc_obj <- pROC::roc(response = y_test, predictor = p_test, quiet = TRUE)
+  roc_obj <- pROC::roc(response = y_test, predictor = lasso_glmnet_test_phat, quiet = TRUE)
   auc_glmnet <- as.numeric(pROC::auc(roc_obj))
-  cat("TEST AUC (glmnet, lambda.1se):", round(auc_glmnet, 4), "\n")
+  cat(lasso_glmnet_name, "TEST AUC:", round(auc_glmnet, 4), "\n")
 }
 
 # Confusion matrices at 0.50 and prevalence cutoff
-pred_05 <- ifelse(p_test >= 0.5, 1, 0)
-cat("\nConfusion matrix (glmnet, cutoff=0.50):\n")
+pred_05 <- ifelse(lasso_glmnet_test_phat >= 0.5, 1, 0)
+cat("\n", lasso_glmnet_name, "confusion matrix (cutoff=0.50):\n", sep = "")
 print(table(Pred = pred_05, Truth = y_test))
 
 prev <- mean(y_train == 1)
-pred_prev <- ifelse(p_test >= prev, 1, 0)
-cat("\nConfusion matrix (glmnet, cutoff=prevalence=", round(prev, 4), "):\n", sep = "")
+pred_prev <- ifelse(lasso_glmnet_test_phat >= prev, 1, 0)
+cat("\n", lasso_glmnet_name, "confusion matrix (cutoff=prevalence=", round(prev, 4), "):\n", sep = "")
 print(table(Pred = pred_prev, Truth = y_test))
 
-# ---- 5) Top coefficients (interpretation aid) ----
-coef_mat <- as.matrix(coef(cv_fit, s = "lambda.1se"))
+# ---- 5) Top coefficients ----
+coef_mat <- as.matrix(coef(lasso_glmnet_cv_fit, s = "lambda.1se"))
 coef_df <- data.frame(
   term = rownames(coef_mat),
   coef = as.numeric(coef_mat[, 1]),
@@ -3020,7 +3057,7 @@ coef_df <- data.frame(
   dplyr::filter(term != "(Intercept)", coef != 0) %>%
   dplyr::arrange(dplyr::desc(abs(coef)))
 
-cat("\nTop 20 non-zero coefficients by |coef| (glmnet, lambda.1se):\n")
+cat("\nTop 20 non-zero coefficients by |coef| (", lasso_glmnet_name, ", lambda.1se):\n", sep = "")
 print(head(coef_df, 20))
 ```
 
@@ -3526,24 +3563,23 @@ if (exists("tests_selected") && nrow(tests_selected) > 0) {
 
 # TARGETED SCENARIO MODEL: interaction-focused policy model
 ```{r}
-# What: Fit a lean GLM using high-impact interaction variables + required parent effects.
-# Why: Directly answers "which specific conditions should we target?"
+# What: Fit the targeted scenario GLM using high-impact interaction variables + required parent effects.
+# Why: Reuses the shared split and makes the scenario model clearly identifiable.
 
 set.seed(544)
+
+targeted_scenario_glm_name <- "Targeted Scenario GLM"
 
 # ---- 1) Define predictors ----
 scenario_predictors <- intersect(
   c(
-    # --- REQUIRED MAIN EFFECTS (parents of interactions) ---
-    "day_group",        # parent of friday_night
+    "day_group",
     "night",
     "is_ped",
     "INTERSECTION",
     "STATE_HWY_IND",
     "lighting_group",
     "pcf_dui",
-
-    # --- INTERACTIONS (your focus) ---
     "friday_night",
     "ped_dark",
     "intersection_ped",
@@ -3553,12 +3589,12 @@ scenario_predictors <- intersect(
   names(switrs_reduced)
 )
 
-cat("Scenario model predictors:\n")
+cat(targeted_scenario_glm_name, "predictors:\n")
 print(scenario_predictors)
 
 # ---- 2) Build modeling dataset ----
 scenario_df <- switrs_reduced %>%
-  dplyr::select(all_of(c("SevereBinary", scenario_predictors))) %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", scenario_predictors))) %>%
   dplyr::filter(!is.na(SevereBinary)) %>%
   dplyr::mutate(
     SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
@@ -3566,70 +3602,139 @@ scenario_df <- switrs_reduced %>%
   dplyr::mutate(across(where(is.character), as.factor)) %>%
   dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
 
-# ---- 3) Stratified split (same logic as baseline) ----
-idx_sev <- which(scenario_df$SevereBinary == "Severe/Fatal")
-idx_oth <- which(scenario_df$SevereBinary == "Other")
+# ---- 3) Full-data numeric imputation BEFORE split ----
+num_cols <- names(scenario_df)[sapply(scenario_df, is.numeric)]
+num_cols <- setdiff(num_cols, c("CASE_ID", "SevereBinary"))
 
-test_frac <- 0.30
-
-test_idx <- c(
-  sample(idx_sev, size = floor(length(idx_sev) * test_frac)),
-  sample(idx_oth, size = floor(length(idx_oth) * test_frac))
-)
-
-test_scen  <- scenario_df[test_idx, , drop = FALSE]
-train_scen <- scenario_df[-test_idx, , drop = FALSE]
-
-cat("Train n =", nrow(train_scen), "| Test n =", nrow(test_scen), "\n")
-
-# ---- 4) Train-only numeric imputation (safe) ----
-num_cols <- names(train_scen)[sapply(train_scen, is.numeric)]
-num_cols <- setdiff(num_cols, "SevereBinary")
+scenario_full_medians <- setNames(vector("list", length(num_cols)), num_cols)
 
 for (v in num_cols) {
   miss_name <- paste0(v, "_miss")
 
-  train_scen[[miss_name]] <- as.integer(is.na(train_scen[[v]]))
-  test_scen[[miss_name]]  <- as.integer(is.na(test_scen[[v]]))
+  scenario_df[[miss_name]] <- as.integer(is.na(scenario_df[[v]]))
 
-  med <- median(train_scen[[v]], na.rm = TRUE)
+  med <- suppressWarnings(median(scenario_df[[v]], na.rm = TRUE))
   if (is.na(med)) med <- 0
 
-  train_scen[[v]][is.na(train_scen[[v]])] <- med
-  test_scen[[v]][is.na(test_scen[[v]])]   <- med
+  scenario_full_medians[[v]] <- med
+  scenario_df[[v]][is.na(scenario_df[[v]])] <- med
 }
 
-# ---- 5) Fit GLM ----
-glm_scenario <- glm(
+# ---- 4) Reuse the SAME split as the shared split chunk ----
+if (!exists("train_case_ids") || !exists("test_case_ids")) {
+  stop("Shared split not found. Run the shared_train_test_split chunk first.")
+}
+
+train_scen_raw <- scenario_df %>%
+  dplyr::filter(CASE_ID %in% train_case_ids)
+
+test_scen_raw <- scenario_df %>%
+  dplyr::filter(CASE_ID %in% test_case_ids)
+
+# ---- 5) Drop train-constant predictors ----
+is_constant_scen <- sapply(train_scen_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
+  length(ux) <= 1
+})
+
+if (any(is_constant_scen)) {
+  cat("Dropping", targeted_scenario_glm_name, "train-constant predictors:\n")
+  print(names(is_constant_scen)[is_constant_scen])
+
+  keep_cols_scen <- c("CASE_ID", "SevereBinary", names(is_constant_scen)[!is_constant_scen])
+  train_scen_raw <- train_scen_raw %>% dplyr::select(all_of(keep_cols_scen))
+  test_scen_raw  <- test_scen_raw  %>% dplyr::select(all_of(keep_cols_scen))
+}
+
+# ---- 6) Drop practical separators using TRAIN only ----
+if (!exists("is_perfect_separator")) {
+  is_perfect_separator <- function(x, y, min_level_n = 30) {
+    if (is.character(x) || is.factor(x)) {
+      tab <- table(x, y, useNA = "no")
+      lvl_n <- rowSums(tab)
+      tab2 <- tab[lvl_n >= min_level_n, , drop = FALSE]
+      if (nrow(tab2) == 0) return(FALSE)
+      any(tab2[, "Other"] == 0 | tab2[, "Severe/Fatal"] == 0)
+    } else if (is.numeric(x) || is.integer(x)) {
+      ux <- sort(unique(x))
+      ux <- ux[!is.na(ux)]
+      if (length(ux) <= 1) return(FALSE)
+      qs <- unique(stats::quantile(x, probs = seq(0.1, 0.9, by = 0.1), na.rm = TRUE))
+      qs <- qs[!is.na(qs)]
+      for (cut in qs) {
+        left  <- y[x <= cut]
+        right <- y[x >  cut]
+        if (length(left) >= min_level_n && length(right) >= min_level_n) {
+          if (all(left == "Other") || all(left == "Severe/Fatal") ||
+              all(right == "Other") || all(right == "Severe/Fatal")) {
+            return(TRUE)
+          }
+        }
+      }
+      FALSE
+    } else {
+      FALSE
+    }
+  }
+}
+
+y_train_scen <- train_scen_raw$SevereBinary
+pred_names_scen <- setdiff(names(train_scen_raw), c("CASE_ID", "SevereBinary"))
+
+sep_flags_scen <- sapply(pred_names_scen, function(v) {
+  is_perfect_separator(train_scen_raw[[v]], y_train_scen)
+})
+bad_vars_scen <- names(sep_flags_scen)[sep_flags_scen]
+
+cat(targeted_scenario_glm_name, "predictors dropped for practical separation:", length(bad_vars_scen), "\n")
+if (length(bad_vars_scen) > 0) print(bad_vars_scen)
+
+if (length(bad_vars_scen) > 0) {
+  train_scen_raw <- train_scen_raw %>% dplyr::select(-dplyr::all_of(bad_vars_scen))
+  test_scen_raw  <- test_scen_raw  %>% dplyr::select(-dplyr::all_of(bad_vars_scen))
+}
+
+train_scen <- train_scen_raw %>% dplyr::select(-CASE_ID)
+test_scen  <- test_scen_raw  %>% dplyr::select(-CASE_ID)
+
+cat("\nFinal", targeted_scenario_glm_name, "columns:\n")
+print(names(train_scen))
+cat(targeted_scenario_glm_name, "final split sizes: Train =", nrow(train_scen), "| Test =", nrow(test_scen), "\n")
+
+# ---- 7) Fit GLM ----
+targeted_scenario_glm_fit <- glm(
   SevereBinary ~ .,
   data = train_scen,
   family = binomial(),
   control = glm.control(maxit = 50)
 )
 
-cat("Scenario model converged? ", glm_scenario$converged, "\n", sep = "")
+glm_scenario <- targeted_scenario_glm_fit
 
-# ---- 6) Evaluate ----
-test_phat_scen <- predict(glm_scenario, newdata = test_scen, type = "response")
+cat(targeted_scenario_glm_name, "converged? ", targeted_scenario_glm_fit$converged, "\n", sep = "")
+
+# ---- 8) Evaluate ----
+targeted_scenario_test_phat <- predict(targeted_scenario_glm_fit, newdata = test_scen, type = "response")
+test_phat_scen <- targeted_scenario_test_phat
 test_y_scen <- test_scen$SevereBinary
 
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
-roc_obj <- pROC::roc(test_y_scen, test_phat_scen, levels = c("Other","Severe/Fatal"), quiet = TRUE)
+roc_obj <- pROC::roc(test_y_scen, targeted_scenario_test_phat, levels = c("Other","Severe/Fatal"), quiet = TRUE)
 
-cat("Scenario model TEST AUC:", round(pROC::auc(roc_obj), 4), "\n")
+cat(targeted_scenario_glm_name, "TEST AUC:", round(pROC::auc(roc_obj), 4), "\n")
 
-# Confusion matrices
-pred_05 <- factor(ifelse(test_phat_scen >= 0.5, "Severe/Fatal", "Other"), levels = levels(test_y_scen))
-cat("\nConfusion matrix (0.50 cutoff):\n")
-print(table(Pred = pred_05, Truth = test_y_scen))
+pred_05_scen <- factor(ifelse(targeted_scenario_test_phat >= 0.5, "Severe/Fatal", "Other"), levels = levels(test_y_scen))
+cat("\n", targeted_scenario_glm_name, "confusion matrix (0.50 cutoff):\n", sep = "")
+print(table(Pred = pred_05_scen, Truth = test_y_scen))
 
-prev <- mean(train_scen$SevereBinary == "Severe/Fatal")
-pred_prev <- factor(ifelse(test_phat_scen >= prev, "Severe/Fatal", "Other"), levels = levels(test_y_scen))
-cat("\nConfusion matrix (prevalence cutoff):\n")
-print(table(Pred = pred_prev, Truth = test_y_scen))
+prev_scen <- mean(train_scen$SevereBinary == "Severe/Fatal")
+pred_prev_scen <- factor(ifelse(targeted_scenario_test_phat >= prev_scen, "Severe/Fatal", "Other"), levels = levels(test_y_scen))
+cat("\n", targeted_scenario_glm_name, "confusion matrix (prevalence cutoff):\n", sep = "")
+print(table(Pred = pred_prev_scen, Truth = test_y_scen))
 
-# ---- 7) Odds ratios ----
-coefs <- summary(glm_scenario)$coefficients
+# ---- 9) Odds ratios ----
+coefs <- summary(targeted_scenario_glm_fit)$coefficients
 
 or_tbl_scen <- data.frame(
   term = rownames(coefs),
@@ -3646,18 +3751,18 @@ or_tbl_scen <- data.frame(
   ) %>%
   dplyr::arrange(dplyr::desc(abs(estimate)))
 
-cat("\nTop scenario-model odds ratios:\n")
+cat("\nTop", targeted_scenario_glm_name, "odds ratios:\n")
 print(head(or_tbl_scen, 15))
 ```
 
-
 # Comparison and operating point metrics
 ```{r model_compare, message=FALSE, warning=FALSE}
-# MODEL COMPARISON: GLM baseline vs glmnet (AUC + threshold metrics)
-# What: Put both models on the same footing and summarize test performance.
-# Why: Client-ready model selection story + operating threshold guidance under class imbalance.
+# What: Compare the Baseline GLM and LASSO GLMNET on the same shared test set.
+# Why: Keeps model names explicit and easy to follow.
 
-# Helper: compute metrics from probs at a cutoff
+baseline_glm_name <- "Baseline GLM"
+lasso_glmnet_name <- "LASSO GLMNET"
+
 metric_at_cutoff <- function(y01, p, cutoff) {
   pred <- as.integer(p >= cutoff)
   tp <- sum(pred == 1 & y01 == 1)
@@ -3675,21 +3780,17 @@ metric_at_cutoff <- function(y01, p, cutoff) {
   )
 }
 
-# Need: test_set + test_phat from GLM chunk; p_test + y_test from glmnet chunk
-if (!exists("test_set")) stop("test_set not found (from GLM baseline chunk).")
-if (!exists("test_phat")) stop("test_phat not found (from GLM baseline chunk).")
-if (!exists("p_test")) stop("p_test not found (from glmnet chunk).")
-if (!exists("y_test")) stop("y_test not found (from glmnet chunk).")
+if (!exists("test_set")) stop("test_set not found (from Baseline GLM chunk).")
+if (!exists("test_phat")) stop("test_phat not found (from Baseline GLM chunk).")
+if (!exists("p_test")) stop("p_test not found (from LASSO GLMNET chunk).")
+if (!exists("y_test")) stop("y_test not found (from LASSO GLMNET chunk).")
 
-# GLM test outcome/probs
 y_glm <- as.integer(test_set$SevereBinary == "Severe/Fatal")
 p_glm <- as.numeric(test_phat)
 
-# glmnet test outcome/probs
-y_en <- as.integer(y_test)   # already 0/1
+y_en <- as.integer(y_test)
 p_en <- as.numeric(p_test)
 
-# AUCs
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
 auc_glm <- NA_real_
 auc_en  <- NA_real_
@@ -3699,24 +3800,24 @@ if (requireNamespace("pROC", quietly = TRUE)) {
   auc_en  <- as.numeric(pROC::auc(pROC::roc(y_en,  p_en,  quiet = TRUE)))
 }
 
-# Prevalence cutoff based on training set
 prev <- mean(as.integer(train_set$SevereBinary == "Severe/Fatal"))
 
-# Metrics at 0.50 and prevalence cutoffs
 glm_05   <- metric_at_cutoff(y_glm, p_glm, 0.5)
 glm_prev <- metric_at_cutoff(y_glm, p_glm, prev)
 
 en_05    <- metric_at_cutoff(y_en,  p_en,  0.5)
 en_prev  <- metric_at_cutoff(y_en,  p_en,  prev)
 
-glm_05$model <- "GLM";     glm_prev$model <- "GLM"
-en_05$model  <- "glmnet";  en_prev$model  <- "glmnet"
+glm_05$model   <- baseline_glm_name
+glm_prev$model <- baseline_glm_name
+en_05$model    <- lasso_glmnet_name
+en_prev$model  <- lasso_glmnet_name
 
 perf_tbl <- dplyr::bind_rows(glm_05, glm_prev, en_05, en_prev) %>%
   dplyr::select(model, cutoff, sensitivity, specificity, precision, accuracy)
 
 auc_tbl <- data.frame(
-  model = c("GLM", "glmnet"),
+  model = c(baseline_glm_name, lasso_glmnet_name),
   test_auc = c(auc_glm, auc_en)
 )
 
@@ -3727,18 +3828,18 @@ cat("\nOperating point metrics (test set):\n")
 print(perf_tbl)
 ```
 
-
 # Targeted subgroup extension model
 ```{r subgroup_extension_model, message=FALSE, warning=FALSE}
-# What: Fit a second GLM that adds the subgroup interaction variables
-#       intersection_ped and highway_night to the existing policy model.
-# Why: Keeps the main model clean, while testing whether these more specific
-#      deployment-oriented subgroup signals improve discrimination or sensitivity.
+# What: Fit the Baseline GLM + subgroup extension model using the shared split.
+# Why: Makes the subgroup model easy to distinguish from the other models.
+
+baseline_glm_name <- "Baseline GLM"
+subgroup_extension_glm_name <- "Baseline GLM + Subgroup Extension"
 
 if (!exists("switrs_reduced")) stop("switrs_reduced not found.")
-if (!exists("candidate_predictors")) stop("candidate_predictors not found. Run the baseline modeling chunk first.")
-if (!exists("test_idx")) stop("test_idx not found. Run the baseline modeling chunk first.")
-if (!exists("is_perfect_separator")) stop("is_perfect_separator() not found. Run the baseline modeling chunk first.")
+if (!exists("candidate_predictors")) stop("candidate_predictors not found. Run the Baseline GLM chunk first.")
+if (!exists("train_case_ids") || !exists("test_case_ids")) stop("Shared split not found. Run the shared_train_test_split chunk first.")
+if (!exists("is_perfect_separator")) stop("is_perfect_separator() not found. Run the Baseline GLM chunk first.")
 
 subgroup_addons <- intersect(c("intersection_ped", "highway_night"), names(switrs_reduced))
 if (length(subgroup_addons) == 0) stop("Neither intersection_ped nor highway_night is available in switrs_reduced.")
@@ -3746,11 +3847,11 @@ if (length(subgroup_addons) == 0) stop("Neither intersection_ped nor highway_nig
 candidate_predictors_subgroup <- unique(c(candidate_predictors, subgroup_addons))
 candidate_predictors_subgroup <- setdiff(candidate_predictors_subgroup, leakage_vars)
 
-cat("Subgroup extension predictors added:\n")
+cat(subgroup_extension_glm_name, "predictors added:\n")
 print(subgroup_addons)
 
 model_df_sub_raw <- switrs_reduced %>%
-  dplyr::select(all_of(c("SevereBinary", candidate_predictors_subgroup))) %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", candidate_predictors_subgroup))) %>%
   dplyr::filter(!is.na(SevereBinary)) %>%
   dplyr::mutate(
     SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
@@ -3758,73 +3859,82 @@ model_df_sub_raw <- switrs_reduced %>%
   dplyr::mutate(across(where(is.character), as.factor)) %>%
   dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
 
-# Use the SAME split as the main model for apples-to-apples comparison
-test_set_sub_raw  <- model_df_sub_raw[test_idx, , drop = FALSE]
-train_set_sub_raw <- model_df_sub_raw[-test_idx, , drop = FALSE]
+# ---- Full-data numeric imputation BEFORE split ----
+num_cols_sub <- names(model_df_sub_raw)[sapply(model_df_sub_raw, is.numeric)]
+num_cols_sub <- setdiff(num_cols_sub, c("CASE_ID", "SevereBinary"))
 
-# Train-learned numeric imputation
-num_cols_sub <- names(train_set_sub_raw)[sapply(train_set_sub_raw, is.numeric)]
-num_cols_sub <- setdiff(num_cols_sub, "SevereBinary")
+subgroup_full_medians <- setNames(vector("list", length(num_cols_sub)), num_cols_sub)
 
 for (v in num_cols_sub) {
   miss_name <- paste0(v, "_miss")
 
-  train_set_sub_raw[[miss_name]] <- as.integer(is.na(train_set_sub_raw[[v]]))
-  test_set_sub_raw[[miss_name]]  <- as.integer(is.na(test_set_sub_raw[[v]]))
+  model_df_sub_raw[[miss_name]] <- as.integer(is.na(model_df_sub_raw[[v]]))
 
-  med <- suppressWarnings(median(train_set_sub_raw[[v]], na.rm = TRUE))
+  med <- suppressWarnings(median(model_df_sub_raw[[v]], na.rm = TRUE))
   if (is.na(med)) med <- 0
 
-  train_set_sub_raw[[v]][is.na(train_set_sub_raw[[v]])] <- med
-  test_set_sub_raw[[v]][is.na(test_set_sub_raw[[v]])]   <- med
+  subgroup_full_medians[[v]] <- med
+  model_df_sub_raw[[v]][is.na(model_df_sub_raw[[v]])] <- med
 }
 
-# Drop train-constant predictors
-is_constant_sub <- sapply(train_set_sub_raw %>% dplyr::select(-SevereBinary), function(x) {
+# ---- Reuse shared split ----
+train_set_sub_raw <- model_df_sub_raw %>%
+  dplyr::filter(CASE_ID %in% train_case_ids)
+
+test_set_sub_raw <- model_df_sub_raw %>%
+  dplyr::filter(CASE_ID %in% test_case_ids)
+
+# ---- Drop train-constant predictors ----
+is_constant_sub <- sapply(train_set_sub_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
   ux <- unique(x)
   ux <- ux[!is.na(ux)]
   length(ux) <= 1
 })
 
 if (any(is_constant_sub)) {
-  cat("Dropping subgroup-model train-constant predictors:\n")
+  cat("Dropping", subgroup_extension_glm_name, "train-constant predictors:\n")
   print(names(is_constant_sub)[is_constant_sub])
 
-  keep_cols_sub <- c("SevereBinary", names(is_constant_sub)[!is_constant_sub])
+  keep_cols_sub <- c("CASE_ID", "SevereBinary", names(is_constant_sub)[!is_constant_sub])
   train_set_sub_raw <- train_set_sub_raw %>% dplyr::select(all_of(keep_cols_sub))
   test_set_sub_raw  <- test_set_sub_raw  %>% dplyr::select(all_of(keep_cols_sub))
 }
 
-# Drop practical separators using TRAIN only
+# ---- Drop practical separators using TRAIN only ----
 y_train_sub <- train_set_sub_raw$SevereBinary
-pred_names_sub <- setdiff(names(train_set_sub_raw), "SevereBinary")
+pred_names_sub <- setdiff(names(train_set_sub_raw), c("CASE_ID", "SevereBinary"))
 
 sep_flags_sub <- sapply(pred_names_sub, function(v) {
   is_perfect_separator(train_set_sub_raw[[v]], y_train_sub)
 })
 bad_vars_sub <- names(sep_flags_sub)[sep_flags_sub]
 
-cat("Subgroup-model predictors dropped for practical separation:", length(bad_vars_sub), "\n")
+cat(subgroup_extension_glm_name, "predictors dropped for practical separation:", length(bad_vars_sub), "\n")
 if (length(bad_vars_sub) > 0) print(bad_vars_sub)
 
 if (length(bad_vars_sub) > 0) {
-  train_set_sub <- train_set_sub_raw %>% dplyr::select(-dplyr::all_of(bad_vars_sub))
-  test_set_sub  <- test_set_sub_raw  %>% dplyr::select(-dplyr::all_of(bad_vars_sub))
-} else {
-  train_set_sub <- train_set_sub_raw
-  test_set_sub  <- test_set_sub_raw
+  train_set_sub_raw <- train_set_sub_raw %>% dplyr::select(-dplyr::all_of(bad_vars_sub))
+  test_set_sub_raw  <- test_set_sub_raw  %>% dplyr::select(-dplyr::all_of(bad_vars_sub))
 }
 
-glm_fit_subgroup <- glm(
+train_set_sub <- train_set_sub_raw %>% dplyr::select(-CASE_ID)
+test_set_sub  <- test_set_sub_raw  %>% dplyr::select(-CASE_ID)
+
+subgroup_extension_glm_fit <- glm(
   SevereBinary ~ .,
   data = train_set_sub,
   family = binomial(),
   control = glm.control(maxit = 50)
 )
 
-cat("Subgroup GLM converged? ", glm_fit_subgroup$converged, "\n", sep = "")
+glm_fit_subgroup <- subgroup_extension_glm_fit
 
-test_phat_subgroup <- as.numeric(predict(glm_fit_subgroup, newdata = test_set_sub, type = "response"))
+cat(subgroup_extension_glm_name, "converged? ", subgroup_extension_glm_fit$converged, "\n", sep = "")
+
+subgroup_extension_test_phat <- as.numeric(
+  predict(subgroup_extension_glm_fit, newdata = test_set_sub, type = "response")
+)
+test_phat_subgroup <- subgroup_extension_test_phat
 test_y_subgroup <- test_set_sub$SevereBinary
 
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
@@ -3834,7 +3944,7 @@ auc_baseline_now <- NA_real_
 
 if (requireNamespace("pROC", quietly = TRUE)) {
   auc_subgroup <- as.numeric(
-    pROC::auc(pROC::roc(test_y_subgroup, test_phat_subgroup,
+    pROC::auc(pROC::roc(test_y_subgroup, subgroup_extension_test_phat,
                         levels = c("Other", "Severe/Fatal"), quiet = TRUE))
   )
 
@@ -3866,23 +3976,23 @@ metric_at_cutoff_local <- function(y_factor, p, cutoff) {
 
 prev_sub <- mean(train_set_sub$SevereBinary == "Severe/Fatal")
 
-subgroup_metrics_05   <- metric_at_cutoff_local(test_y_subgroup, test_phat_subgroup, 0.5)
-subgroup_metrics_prev <- metric_at_cutoff_local(test_y_subgroup, test_phat_subgroup, prev_sub)
+subgroup_metrics_05   <- metric_at_cutoff_local(test_y_subgroup, subgroup_extension_test_phat, 0.5)
+subgroup_metrics_prev <- metric_at_cutoff_local(test_y_subgroup, subgroup_extension_test_phat, prev_sub)
 
 subgroup_model_compare <- dplyr::bind_rows(
   data.frame(
-    model = "Baseline GLM",
+    model = baseline_glm_name,
     test_auc = auc_baseline_now
   ),
   data.frame(
-    model = "GLM + subgroup interactions",
+    model = subgroup_extension_glm_name,
     test_auc = auc_subgroup
   )
 )
 
 subgroup_perf_tbl <- dplyr::bind_rows(
-  cbind(model = "GLM + subgroup interactions", threshold = "0.50", subgroup_metrics_05),
-  cbind(model = "GLM + subgroup interactions", threshold = "Prevalence", subgroup_metrics_prev)
+  cbind(model = subgroup_extension_glm_name, threshold = "0.50", subgroup_metrics_05),
+  cbind(model = subgroup_extension_glm_name, threshold = "Prevalence", subgroup_metrics_prev)
 )
 
 cat("\nAUC comparison:\n")
@@ -3891,208 +4001,19 @@ print(subgroup_model_compare)
 cat("\nSubgroup extension operating-point metrics:\n")
 print(subgroup_perf_tbl)
 
-cat("\nSubgroup extension confusion matrix (cutoff=0.50):\n")
+cat("\n", subgroup_extension_glm_name, "confusion matrix (cutoff=0.50):\n", sep = "")
 print(table(
-  Pred = factor(ifelse(test_phat_subgroup >= 0.5, "Severe/Fatal", "Other"),
+  Pred = factor(ifelse(subgroup_extension_test_phat >= 0.5, "Severe/Fatal", "Other"),
                 levels = c("Other", "Severe/Fatal")),
   Truth = test_y_subgroup
 ))
 
-cat("\nSubgroup extension confusion matrix (cutoff=prevalence=", round(prev_sub, 4), "):\n", sep = "")
+cat("\n", subgroup_extension_glm_name, "confusion matrix (cutoff=prevalence=", round(prev_sub, 4), "):\n", sep = "")
 print(table(
-  Pred = factor(ifelse(test_phat_subgroup >= prev_sub, "Severe/Fatal", "Other"),
+  Pred = factor(ifelse(subgroup_extension_test_phat >= prev_sub, "Severe/Fatal", "Other"),
                 levels = c("Other", "Severe/Fatal")),
   Truth = test_y_subgroup
 ))
-```
-
-# Save model comparison log
-```{r save_model_comparison_log, message=FALSE, warning=FALSE}
-run_label <- "current_models"
-log_path  <- "model_comparison_log_3.csv"
-
-make_log_row <- function(run_label, notebook_version, model_name, auc_value,
-                         cutoff_050, sensitivity_050, specificity_050, precision_050, accuracy_050,
-                         cutoff_prev, sensitivity_prev, specificity_prev, precision_prev, accuracy_prev) {
-  data.frame(
-    run_label = run_label,
-    notebook_version = "merged_data_project.Rmd",
-    saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-    model = model_name,
-    test_auc = as.numeric(auc_value),
-
-    cutoff_050 = as.numeric(cutoff_050),
-    sensitivity_050 = as.numeric(sensitivity_050),
-    specificity_050 = as.numeric(specificity_050),
-    precision_050   = as.numeric(precision_050),
-    accuracy_050    = as.numeric(accuracy_050),
-
-    cutoff_prev = as.numeric(cutoff_prev),
-    sensitivity_prev = as.numeric(sensitivity_prev),
-    specificity_prev = as.numeric(specificity_prev),
-    precision_prev   = as.numeric(precision_prev),
-    accuracy_prev    = as.numeric(accuracy_prev),
-
-    stringsAsFactors = FALSE
-  )
-}
-
-get_metric <- function(tbl, model_name, cutoff_value, metric_name) {
-  if (is.null(tbl)) return(NA_real_)
-  needed <- c("model", "cutoff", metric_name)
-  if (!all(needed %in% names(tbl))) return(NA_real_)
-  if (is.na(cutoff_value)) return(NA_real_)
-
-  idx <- which(
-    as.character(tbl$model) == model_name &
-      abs(as.numeric(tbl$cutoff) - cutoff_value) < 1e-8
-  )
-
-  if (length(idx) == 0) return(NA_real_)
-  as.numeric(tbl[[metric_name]][idx[1]])
-}
-
-get_auc <- function(tbl, model_name) {
-  if (is.null(tbl) || !all(c("model", "test_auc") %in% names(tbl))) return(NA_real_)
-  idx <- which(as.character(tbl$model) == model_name)
-  if (length(idx) == 0) return(NA_real_)
-  as.numeric(tbl$test_auc[idx[1]])
-}
-
-log_rows <- list()
-
-# GLM row
-log_rows[[length(log_rows) + 1]] <- make_log_row(
-  run_label = run_label,
-  notebook_version = "merged_data_project.Rmd",
-  model_name = "GLM",
-  auc_value = if (exists("auc_tbl")) get_auc(auc_tbl, "GLM") else NA_real_,
-
-  cutoff_050 = 0.50,
-  sensitivity_050 = if (exists("perf_tbl")) get_metric(perf_tbl, "GLM", 0.50, "sensitivity") else NA_real_,
-  specificity_050 = if (exists("perf_tbl")) get_metric(perf_tbl, "GLM", 0.50, "specificity") else NA_real_,
-  precision_050   = if (exists("perf_tbl")) get_metric(perf_tbl, "GLM", 0.50, "precision") else NA_real_,
-  accuracy_050    = if (exists("perf_tbl")) get_metric(perf_tbl, "GLM", 0.50, "accuracy") else NA_real_,
-
-  cutoff_prev = if (exists("prev")) as.numeric(prev[1]) else NA_real_,
-  sensitivity_prev = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "GLM", as.numeric(prev[1]), "sensitivity") else NA_real_,
-  specificity_prev = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "GLM", as.numeric(prev[1]), "specificity") else NA_real_,
-  precision_prev   = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "GLM", as.numeric(prev[1]), "precision") else NA_real_,
-  accuracy_prev    = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "GLM", as.numeric(prev[1]), "accuracy") else NA_real_
-)
-
-# glmnet row
-log_rows[[length(log_rows) + 1]] <- make_log_row(
-  run_label = run_label,
-  notebook_version = "merged_data_project.Rmd",
-  model_name = "glmnet",
-  auc_value = if (exists("auc_tbl")) get_auc(auc_tbl, "glmnet") else NA_real_,
-
-  cutoff_050 = 0.50,
-  sensitivity_050 = if (exists("perf_tbl")) get_metric(perf_tbl, "glmnet", 0.50, "sensitivity") else NA_real_,
-  specificity_050 = if (exists("perf_tbl")) get_metric(perf_tbl, "glmnet", 0.50, "specificity") else NA_real_,
-  precision_050   = if (exists("perf_tbl")) get_metric(perf_tbl, "glmnet", 0.50, "precision") else NA_real_,
-  accuracy_050    = if (exists("perf_tbl")) get_metric(perf_tbl, "glmnet", 0.50, "accuracy") else NA_real_,
-
-  cutoff_prev = if (exists("prev")) as.numeric(prev[1]) else NA_real_,
-  sensitivity_prev = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "glmnet", as.numeric(prev[1]), "sensitivity") else NA_real_,
-  specificity_prev = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "glmnet", as.numeric(prev[1]), "specificity") else NA_real_,
-  precision_prev   = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "glmnet", as.numeric(prev[1]), "precision") else NA_real_,
-  accuracy_prev    = if (exists("perf_tbl") && exists("prev")) get_metric(perf_tbl, "glmnet", as.numeric(prev[1]), "accuracy") else NA_real_
-)
-
-# Optional subgroup-extension row
-if (exists("auc_subgroup") && exists("subgroup_perf_tbl")) {
-  row_050  <- subgroup_perf_tbl %>% dplyr::filter(threshold == "0.50")
-  row_prev <- subgroup_perf_tbl %>% dplyr::filter(threshold == "Prevalence")
-
-  log_rows[[length(log_rows) + 1]] <- make_log_row(
-    run_label = run_label,
-    notebook_version = "merged_data_project.Rmd",
-    model_name = "GLM_subgroup_extension",
-    auc_value = as.numeric(auc_subgroup),
-
-    cutoff_050 = 0.50,
-    sensitivity_050 = if (nrow(row_050) > 0) as.numeric(row_050$sensitivity[1]) else NA_real_,
-    specificity_050 = if (nrow(row_050) > 0) as.numeric(row_050$specificity[1]) else NA_real_,
-    precision_050   = if (nrow(row_050) > 0) as.numeric(row_050$precision[1]) else NA_real_,
-    accuracy_050    = if (nrow(row_050) > 0) as.numeric(row_050$accuracy[1]) else NA_real_,
-
-    cutoff_prev = if (exists("prev_sub")) as.numeric(prev_sub[1]) else NA_real_,
-    sensitivity_prev = if (nrow(row_prev) > 0) as.numeric(row_prev$sensitivity[1]) else NA_real_,
-    specificity_prev = if (nrow(row_prev) > 0) as.numeric(row_prev$specificity[1]) else NA_real_,
-    precision_prev   = if (nrow(row_prev) > 0) as.numeric(row_prev$precision[1]) else NA_real_,
-    accuracy_prev    = if (nrow(row_prev) > 0) as.numeric(row_prev$accuracy[1]) else NA_real_
-  )
-}
-
-model_log_new <- dplyr::bind_rows(log_rows)
-
-if (file.exists(log_path)) {
-  model_log_old <- read.csv(log_path, stringsAsFactors = FALSE)
-  if ("run_label" %in% names(model_log_old)) {
-    model_log_old <- model_log_old[model_log_old$run_label != run_label, , drop = FALSE]
-  }
-  model_log_new <- rbind(model_log_old, model_log_new)
-}
-
-write.csv(model_log_new, log_path, row.names = FALSE)
-
-cat("Saved current model log to:", log_path, "\n")
-print(model_log_new[model_log_new$run_label == run_label, , drop = FALSE])
-```
-
-# View saved model history
-```{r view_saved_model_history, message=FALSE, warning=FALSE}
-original_log_path <- "model_comparison_log_original.csv"
-previous_log_path <- "model_comparison_log_2.csv"
-current_log_path  <- "model_comparison_log_3.csv"
-
-read_model_log <- function(path) {
-  if (!file.exists(path)) return(NULL)
-
-  out <- read.csv(path, stringsAsFactors = FALSE)
-
-  needed_cols <- c(
-    "run_label", "notebook_version", "saved_at", "model", "test_auc",
-    "cutoff_050", "sensitivity_050", "specificity_050", "precision_050", "accuracy_050",
-    "cutoff_prev", "sensitivity_prev", "specificity_prev", "precision_prev", "accuracy_prev"
-  )
-
-  for (nm in setdiff(needed_cols, names(out))) {
-    out[[nm]] <- NA
-  }
-
-  out[, needed_cols, drop = FALSE]
-}
-
-log_original <- read_model_log(original_log_path)
-log_previous <- read_model_log(previous_log_path)
-log_current  <- read_model_log(current_log_path)
-
-model_history_tbl <- dplyr::bind_rows(
-  log_original,
-  log_previous,
-  log_current
-) %>%
-  dplyr::mutate(
-    saved_at = as.character(saved_at)
-  ) %>%
-  dplyr::arrange(run_label, model, dplyr::desc(saved_at))
-
-cat("Combined model history:\n")
-print(model_history_tbl)
-
-cat("\nCompact team-facing history view:\n")
-print(
-  model_history_tbl %>%
-    dplyr::select(
-      run_label, notebook_version, model, test_auc,
-      cutoff_050, sensitivity_050, specificity_050, precision_050, accuracy_050,
-      cutoff_prev, sensitivity_prev, specificity_prev, precision_prev, accuracy_prev,
-      saved_at
-    )
-)
 ```
 
 # EXECUTIVE SUMMARY (Storyboard-ready text)
@@ -4102,12 +4023,15 @@ print(
 
 cat("## Executive summary\n\n")
 
+baseline_glm_name <- "Baseline GLM"
+lasso_glmnet_name <- "LASSO GLMNET"
+
 # ---- Key model performance ----
 auc_glm_val    <- NA_real_
 auc_glmnet_val <- NA_real_
 if (exists("auc_tbl") && all(c("model","test_auc") %in% names(auc_tbl))) {
-  auc_glm_val    <- auc_tbl$test_auc[auc_tbl$model == "GLM"]
-  auc_glmnet_val <- auc_tbl$test_auc[auc_tbl$model == "glmnet"]
+  auc_glm_val    <- auc_tbl$test_auc[auc_tbl$model == baseline_glm_name]
+  auc_glmnet_val <- auc_tbl$test_auc[auc_tbl$model == lasso_glmnet_name]
 }
 
 # ---- Weekend vs weekday quick difference (for narrative) ----
@@ -4197,8 +4121,10 @@ if (!is.null(interaction_callouts) && length(interaction_callouts) > 0) {
 cat("\n")
 
 cat(sprintf(
-  "**Predictive validation:** A baseline logistic regression achieves test AUC ≈ %s, and a penalized logistic regression (glmnet) achieves test AUC ≈ %s. We prefer glmnet for stability with many categorical levels.\n\n",
+  "**Predictive validation:** %s achieves test AUC ≈ %s, and %s achieves test AUC ≈ %s.\n\n",
+  baseline_glm_name,
   ifelse(is.na(auc_glm_val), "N/A", format(round(auc_glm_val, 3), nsmall = 3)),
+  lasso_glmnet_name,
   ifelse(is.na(auc_glmnet_val), "N/A", format(round(auc_glmnet_val, 3), nsmall = 3))
 ))
 
