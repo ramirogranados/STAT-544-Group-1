@@ -1,9 +1,9 @@
 ---
 title: "STAT 544 - SWITRS Crash Severity Notebook (Rebuilt for Correctly Merged Data)"
 output:
-  html_document: default
-  pdf_document: default
   html_notebook: default
+  pdf_document: default
+  html_document: default
 ---
 
 # Package Chunk
@@ -165,7 +165,7 @@ switrs_clean <- switrs_clean %>%
 
 # Standard Y/N/Not Stated fields (e.g., INTERSECTION, STATE_HWY_IND, TOW_AWAY, AT_FAULT, etc.)
 crash_yn_whitelist <- intersect(
-  c("INTERSECTION","STATE_HWY_IND","TOW_AWAY","AT_FAULT"),  # add others we *intend*
+  c("INTERSECTION","STATE_HWY_IND","TOW_AWAY","AT_FAULT"),
   names(switrs_clean)
 )
 
@@ -184,7 +184,7 @@ if ("HIT_AND_RUN" %in% names(switrs_clean)) {
     ))
 }
 
-# PCF_VIOL_CATEGORY is Char(2): keep leading zeros (01, 02, ..., 24, 00). 
+# PCF_VIOL_CATEGORY is Char(2): keep leading zeros (01, 02, ..., 24, 00).
 if ("PCF_VIOL_CATEGORY" %in% names(switrs_clean)) {
   switrs_clean <- switrs_clean %>%
     mutate(
@@ -312,14 +312,12 @@ if ("ROAD_SURFACE" %in% names(switrs_reduced)) {
 
   switrs_reduced <- switrs_reduced %>%
     mutate(
-      # normalize blanks/dashes/etc to "Not Stated" (and treat NA as Not Stated for coded fields)
       ROAD_SURFACE = normalize_not_stated(ROAD_SURFACE, blank_to_notstated = TRUE),
       ROAD_SURFACE = ifelse(is.na(ROAD_SURFACE), "Not Stated", ROAD_SURFACE),
 
       ROAD_SURFACE_invalid = ifelse(ROAD_SURFACE %in% valid_road_surface, 0L, 1L),
       ROAD_SURFACE_raw = ifelse(ROAD_SURFACE_invalid == 1L, ROAD_SURFACE, NA_character_),
 
-      # recode invalid codes to Not Stated
       ROAD_SURFACE = ifelse(ROAD_SURFACE_invalid == 1L, "Not Stated", ROAD_SURFACE)
     )
 
@@ -363,7 +361,7 @@ head(missing_tbl, 30)
 # Why: Many SWITRS categoricals were standardized to "Not Stated", so using only true NA
 #      understates how incomplete those variables really are.
 
-high_miss_threshold <- 30  # percent
+high_miss_threshold <- 30
 
 effective_missing_pct <- sapply(switrs_reduced, function(x) {
   if (is.character(x) || is.factor(x)) {
@@ -375,7 +373,6 @@ effective_missing_pct <- sapply(switrs_reduced, function(x) {
 
 high_miss_vars <- names(effective_missing_pct)[effective_missing_pct > high_miss_threshold]
 
-# Never drop core outcome/impact fields, even if missingness is high
 protect_vars <- intersect(
   c("COLLISION_SEVERITY", "NUMBER_KILLED", "NUMBER_INJURED"),
   names(switrs_reduced)
@@ -414,16 +411,14 @@ dim(switrs_reduced)
 # Why: SevereBinary (codes 1/2) is the main actionable “prevent worst outcomes” target.
 #      FatalBinary/Deaths keep the story explicitly “save lives” without leaking into predictors.
 
-# --- Severity code (authoritative KSI proxy) ---
 if ("COLLISION_SEVERITY" %in% names(switrs_reduced)) {
   switrs_reduced <- switrs_reduced %>%
     mutate(
       COLLISION_SEVERITY_CODE = str_trim(as.character(COLLISION_SEVERITY)),
       COLLISION_SEVERITY_CODE = ifelse(COLLISION_SEVERITY_CODE %in% c("", "Not Stated"), NA_character_, COLLISION_SEVERITY_CODE),
 
-      # Primary outcome (KSI): fatal(1) or severe injury(2)
       SevereBinary = case_when(
-        COLLISION_SEVERITY_CODE %in% c("1","2") ~ "Severe/Fatal",   # KSI
+        COLLISION_SEVERITY_CODE %in% c("1","2") ~ "Severe/Fatal",
         COLLISION_SEVERITY_CODE %in% c("0","3","4") ~ "Other",
         TRUE ~ NA_character_
       ),
@@ -433,7 +428,6 @@ if ("COLLISION_SEVERITY" %in% names(switrs_reduced)) {
   stop("COLLISION_SEVERITY not found; cannot create SevereBinary/KSI.")
 }
 
-# --- Fatal-only + deaths (for impact ranking / sensitivity) ---
 if ("NUMBER_KILLED" %in% names(switrs_reduced)) {
   switrs_reduced <- switrs_reduced %>%
     mutate(
@@ -443,7 +437,6 @@ if ("NUMBER_KILLED" %in% names(switrs_reduced)) {
         NUMBER_KILLED_NUM > 0 ~ 1L,
         TRUE ~ 0L
       ),
-      # Deaths as a numeric metric (keep NA as NA; summaries should use na.rm=TRUE)
       Deaths = NUMBER_KILLED_NUM
     )
 } else {
@@ -454,7 +447,6 @@ if ("NUMBER_KILLED" %in% names(switrs_reduced)) {
 cat("\nOutcome counts:\n")
 print(table(switrs_reduced$SevereBinary, useNA = "ifany"))
 
-# --- Optional audit: do fatality counts disagree with severity=1? ---
 if (all(c("FatalBinary","COLLISION_SEVERITY_CODE") %in% names(switrs_reduced))) {
   sev_fatal_code <- switrs_reduced$COLLISION_SEVERITY_CODE == "1"
   cat("\nAudit table: COLLISION_SEVERITY==1 (fatal code) vs FatalBinary(NUMBER_KILLED>0)\n")
@@ -468,23 +460,15 @@ if (all(c("FatalBinary","COLLISION_SEVERITY_CODE") %in% names(switrs_reduced))) 
 
 # Leak-proofing: ban outcome/harm variables from ever being used as predictors
 ```{r}
-# Leak-proofing: ban outcome/harm variables from ever being used as predictors
 leakage_vars <- c(
-  # main outcomes / labels
   "COLLISION_SEVERITY", "COLLISION_SEVERITY_CODE", "COLLISION_SEVERITY_LAB",
   "SevereBinary",
-
-  # fatal/death metrics (should NEVER be predictors)
   "NUMBER_KILLED", "NUMBER_KILLED_NUM", "FatalBinary", "Deaths",
-
-  # injury counts (harm)
   "NUMBER_INJURED",
   "COUNT_SEVERE_INJ", "COUNT_VISIBLE_INJ",
   "COUNT_PED_KILLED", "COUNT_PED_INJURED",
   "COUNT_BICYCLIST_KILLED", "COUNT_BICYCLIST_INJURED",
   "COUNT_MC_KILLED", "COUNT_MC_INJURED",
-
-  # victim-derived “severity-ish” aggregates (harm/leakage)
   "n_victims_killed", "any_victim_ksi"
 )
 
@@ -496,8 +480,6 @@ print(leakage_vars)
 # Location hotspots
 ```{r}
 # WHERE: Hotspot ranking (severe/fatal rate) using available location fields
-# What: Create a crash-location key (best available), then rank locations by severe/fatal rate.
-# Why: Converts the analysis into a resource-allocation tool: "where to focus first."
 
 has_latlon <- all(c("LATITUDE", "LONGITUDE") %in% names(switrs_reduced))
 has_roads  <- all(c("PRIMARY_RD", "SECONDARY_RD") %in% names(switrs_reduced))
@@ -506,30 +488,25 @@ has_city   <- "CITY" %in% names(switrs_reduced)
 switrs_where <- switrs_reduced %>%
   dplyr::filter(!is.na(SevereBinary)) %>%
   dplyr::mutate(
-    # A) Lat/Long bin (~0.01°) for coarse hotspot screening
     lat_bin = if (has_latlon) round(as.numeric(LATITUDE), 2) else NA_real_,
     lon_bin = if (has_latlon) round(as.numeric(LONGITUDE), 2) else NA_real_,
     latlon_key = if (has_latlon) paste0(lat_bin, ", ", lon_bin) else NA_character_,
 
-    # B) Intersection proxy: normalize road strings
     rd1 = if (has_roads) stringr::str_squish(toupper(as.character(PRIMARY_RD))) else NA_character_,
     rd2 = if (has_roads) stringr::str_squish(toupper(as.character(SECONDARY_RD))) else NA_character_,
 
     rd1 = dplyr::if_else(is.na(rd1) | rd1 %in% c("", "NOT STATED", "UNKNOWN"), NA_character_, rd1),
     rd2 = dplyr::if_else(is.na(rd2) | rd2 %in% c("", "NOT STATED", "UNKNOWN"), NA_character_, rd2),
 
-    # IMPORTANT: order the pair per-row so A&B == B&A 
     rd_lo = dplyr::if_else(!is.na(rd1) & !is.na(rd2), pmin(rd1, rd2), NA_character_),
     rd_hi = dplyr::if_else(!is.na(rd1) & !is.na(rd2), pmax(rd1, rd2), NA_character_),
     inter_key = dplyr::if_else(!is.na(rd_lo) & !is.na(rd_hi), paste0(rd_lo, " & ", rd_hi), NA_character_),
 
-    # C) City fallback
     city_key = if (has_city) {
       x <- stringr::str_squish(toupper(as.character(CITY)))
       dplyr::if_else(is.na(x) | x %in% c("", "NOT STATED", "UNKNOWN"), NA_character_, x)
     } else NA_character_,
 
-    # Final location key preference
     location_key = dplyr::case_when(
       !is.na(inter_key) ~ inter_key,
       is.na(inter_key) & !is.na(latlon_key) ~ latlon_key,
@@ -545,7 +522,6 @@ switrs_where <- switrs_reduced %>%
   ) %>%
   dplyr::filter(!is.na(location_key))
 
-# Rank hotspots by Severe/Fatal rate with a minimum denominator
 min_crashes <- 50
 
 hotspot_tbl <- switrs_where %>%
@@ -559,46 +535,41 @@ hotspot_tbl <- switrs_where %>%
   dplyr::filter(n_crashes >= min_crashes) %>%
   dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
 
-# WHERE: Make hotspot output usable (rate + count views)
-
-min_crashes <- 10   # better for intersection-grain
-min_severe  <- 1    # require at least 1 severe/fatal to be a "hotspot" by rate
+min_crashes <- 10
+min_severe  <- 1
 
 hotspot_tbl2 <- switrs_where %>%
   group_by(location_type, location_key) %>%
   summarise(
-  n_crashes = n(),
-  severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
-  severe_per_100 = 100 * severe_n / n_crashes,
-  fatal_crash_n = sum(FatalBinary == 1, na.rm = TRUE),
-  deaths = sum(Deaths, na.rm = TRUE),
-  deaths_per_100 = 100 * deaths / n_crashes,
-  .groups = "drop"
-)
+    n_crashes = n(),
+    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    severe_per_100 = 100 * severe_n / n_crashes,
+    fatal_crash_n = sum(FatalBinary == 1, na.rm = TRUE),
+    deaths = sum(Deaths, na.rm = TRUE),
+    deaths_per_100 = 100 * deaths / n_crashes,
+    .groups = "drop"
+  )
 
-# A) Hotspots by RATE (with minimum volume + at least 1 severe)
 hotspots_by_rate <- hotspot_tbl2 %>%
   filter(n_crashes >= min_crashes, severe_n >= min_severe) %>%
   arrange(desc(severe_per_100), desc(n_crashes))
 
 cat("\nTop 20 hotspots by Severe/Fatal RATE (min_crashes =", min_crashes,
-    ", min_severe =", min_severe, "):\n")
+    ", min_severe =", min_severe, "): \n")
 print(head(hotspots_by_rate, 20))
 
-# B) Hotspots by COUNT (largest severe burden)
 hotspots_by_count <- hotspot_tbl2 %>%
   filter(n_crashes >= min_crashes) %>%
   arrange(desc(severe_n), desc(n_crashes))
 
-# C) Hotspots by DEATHS
 hotspots_by_deaths <- hotspot_tbl2 %>%
   filter(n_crashes >= min_crashes) %>%
   arrange(desc(deaths), desc(n_crashes))
 
-cat("\nTop 20 hotspots by DEATHS (min_crashes =", min_crashes, "):\n")
+cat("\nTop 20 hotspots by DEATHS (min_crashes =", min_crashes, "): \n")
 print(head(hotspots_by_deaths, 20))
 
-cat("\nTop 20 hotspots by Severe/Fatal COUNT (min_crashes =", min_crashes, "):\n")
+cat("\nTop 20 hotspots by Severe/Fatal COUNT (min_crashes =", min_crashes, "): \n")
 print(head(hotspots_by_count, 20))
 ```
 
@@ -610,17 +581,9 @@ summary(nchar(switrs_where$location_key))
 
 # Derive core time features(+ engineered risk flags & interactions)
 ```{r}
-# What: Derive standardized time features (year, hour, weekend, time_bucket) and
-#       engineer proposal-aligned risk flags + interaction terms.
-# Why:  (1) Time features directly answer the client’s “when should we focus?” question.
-#       (2) Engineered flags make coded SWITRS fields interpretable (e.g., rain, dark, DUI, speeding).
-#       (3) Interaction terms operationalize “high-risk conditions” (e.g., Night×DUI, Rain×Speeding,
-#           Pedestrian×Dark) which supports targeted enforcement/interventions rather than generic summaries.
-#       (4) All engineered features are non-leakage (they do not use injury counts or fatalities).
+# What: Derive standardized time features and engineer proposal-aligned risk flags + interaction terms.
 
 safe_parse_yyyymmdd <- function(x) {
-  # What: Parse YYYYMMDD strings to Date.
-  # Why: SWITRS dates often come as numeric-like strings; we need robust Date objects for features/plots.
   x <- as.character(x)
   x <- str_trim(x)
   x[x %in% c("", "Not Stated")] <- NA_character_
@@ -628,47 +591,34 @@ safe_parse_yyyymmdd <- function(x) {
 }
 
 safe_parse_hhmm <- function(x) {
-  # What: Parse HHMM (military time) and return hour (0–23).
-  # Why: Hour-of-day is one of the highest-value features for operational planning.
   x <- as.character(x)
   x <- str_trim(x)
   x[x %in% c("", "Not Stated")] <- NA_character_
   x_num <- suppressWarnings(as.integer(x))
-  x_num[x_num >= 2500] <- NA_integer_   # SWITRS unknown time codes 2500–2559
+  x_num[x_num >= 2500] <- NA_integer_
   hr <- x_num %/% 100
   hr[hr < 0 | hr > 23] <- NA_integer_
   hr
 }
 
-# ---- Core time features ----
-# What: Create year from ACCIDENT_YEAR.
-# Why: Supports year-to-year comparison and protects against mixed-year files.
 if ("ACCIDENT_YEAR" %in% names(switrs_reduced)) {
   switrs_reduced <- switrs_reduced %>% mutate(year = as.integer(ACCIDENT_YEAR))
 }
 
-# What: Create hour (0–23) from COLLISION_TIME.
-# Why: Allows time-of-day risk profiling and time-bucket aggregation.
 if ("COLLISION_TIME" %in% names(switrs_reduced)) {
   switrs_reduced <- switrs_reduced %>% mutate(hour = safe_parse_hhmm(COLLISION_TIME))
 }
-
-# What: Create weekend indicator plus more specific day groupings from DAY_OF_WEEK.
-# Why: Weekend vs weekday is useful, but the client question also cares about specific days
-#      like Friday nights, so we keep both broad and more detailed day features.
 
 if ("DAY_OF_WEEK" %in% names(switrs_reduced)) {
   switrs_reduced <- switrs_reduced %>%
     mutate(
       dow_chr = as.character(DAY_OF_WEEK),
-
       weekend = case_when(
         dow_chr %in% c("6","7","Saturday","Sunday") ~ 1L,
         dow_chr %in% c("1","2","3","4","5","Monday","Tuesday","Wednesday","Thursday","Friday") ~ 0L,
         TRUE ~ NA_integer_
       ),
       weekend = factor(weekend, levels = c(0,1), labels = c("Weekday","Weekend")),
-
       day_group = case_when(
         dow_chr %in% c("1","2","3","4","Monday","Tuesday","Wednesday","Thursday") ~ "Mon-Thu",
         dow_chr %in% c("5","Friday") ~ "Friday",
@@ -681,8 +631,6 @@ if ("DAY_OF_WEEK" %in% names(switrs_reduced)) {
     select(-dow_chr)
 }
 
-# What: Create interpretable time buckets from hour.
-# Why: Makes results client-friendly and reduces noise vs. 24 separate hour levels.
 if ("hour" %in% names(switrs_reduced)) {
   switrs_reduced <- switrs_reduced %>%
     mutate(
@@ -701,9 +649,6 @@ if ("hour" %in% names(switrs_reduced)) {
     )
 }
 
-# ---- Engineered risk flags + interactions (proposal-aligned) ----
-# What: Check column availability before engineering features.
-# Why: Keeps the notebook robust if the merged file has slightly different columns.
 has_pcf      <- "PCF_VIOL_CATEGORY" %in% names(switrs_reduced)
 has_weather  <- "WEATHER_1" %in% names(switrs_reduced)
 has_light    <- "LIGHTING" %in% names(switrs_reduced)
@@ -712,8 +657,6 @@ has_hour     <- "hour" %in% names(switrs_reduced)
 
 switrs_reduced <- switrs_reduced %>%
   mutate(
-    # What: Night indicator (20:00–05:59).
-    # Why: “Night driving” risk patterns are different and are central to many interventions.
     night = if (has_hour) {
       case_when(
         is.na(hour) ~ NA_integer_,
@@ -721,8 +664,8 @@ switrs_reduced <- switrs_reduced %>%
         TRUE ~ 0L
       )
     } else NA_integer_,
-    
-      friday_night = case_when(
+
+    friday_night = case_when(
       is.na(night) ~ NA_integer_,
       as.character(DAY_OF_WEEK) %in% c("5", "Friday") & night == 1L ~ 1L,
       as.character(DAY_OF_WEEK) %in% c("1","2","3","4","6","7",
@@ -732,8 +675,6 @@ switrs_reduced <- switrs_reduced %>%
       TRUE ~ NA_integer_
     ),
 
-    # What: PCF-based DUI flag (01 = DUI; 23 = Ped/Other DUI).
-    # Why: Provides an interpretable DUI-related risk proxy that can be interacted with time/lighting.
     pcf_dui = if (has_pcf) {
       x <- as.character(PCF_VIOL_CATEGORY)
       x <- str_trim(x)
@@ -744,8 +685,6 @@ switrs_reduced <- switrs_reduced %>%
       )
     } else NA_integer_,
 
-    # What: PCF-based unsafe speed flag (03).
-    # Why: Speeding is a common actionable lever (enforcement, signage, engineering).
     pcf_speed = if (has_pcf) {
       x <- as.character(PCF_VIOL_CATEGORY)
       x <- str_trim(x)
@@ -756,8 +695,6 @@ switrs_reduced <- switrs_reduced %>%
       )
     } else NA_integer_,
 
-    # What: Rain indicator from WEATHER_1 (C = Raining).
-    # Why: Weather is a situational condition; “rainy days” is explicitly in the client prompt.
     is_rain = if (has_weather) {
       x <- as.character(WEATHER_1)
       x <- str_trim(x)
@@ -768,8 +705,6 @@ switrs_reduced <- switrs_reduced %>%
       )
     } else NA_integer_,
 
-    # What: Dark indicator from LIGHTING (C/D/E = dark variants).
-    # Why: Lighting is strongly operational (street lighting, patrol visibility, nighttime enforcement).
     is_dark = if (has_light) {
       x <- as.character(LIGHTING)
       x <- str_trim(x)
@@ -780,8 +715,6 @@ switrs_reduced <- switrs_reduced %>%
       )
     } else NA_integer_,
 
-    # What: Pedestrian-involved indicator from PEDESTRIAN_ACCIDENT.
-    # Why: “Pedestrian involved” is a major severity driver and aligns with proposal emphasis.
     is_ped = if (has_ped) {
       x <- as.character(PEDESTRIAN_ACCIDENT)
       x <- str_trim(x)
@@ -793,9 +726,6 @@ switrs_reduced <- switrs_reduced %>%
       )
     } else NA_integer_,
 
-    # What: Interaction terms capturing compounded risk.
-    # Why: These are the most “consulting-grade” outputs: not just whether factors matter,
-    #      but which *combinations* create the highest-risk scenarios.
     night_dui  = ifelse(!is.na(night) & !is.na(pcf_dui),     as.integer(night == 1L & pcf_dui == 1L), NA_integer_),
     rain_speed = ifelse(!is.na(is_rain) & !is.na(pcf_speed), as.integer(is_rain == 1L & pcf_speed == 1L), NA_integer_),
     ped_dark   = ifelse(!is.na(is_ped) & !is.na(is_dark),    as.integer(is_ped == 1L & is_dark == 1L), NA_integer_)
@@ -808,9 +738,6 @@ switrs_reduced <- switrs_reduced %>%
 
 # Grouped lighting/weather variables for more interpretable modeling
 ```{r}
-# What: Collapse detailed codebook levels into policy-friendly groups.
-# Why: This keeps more information than simple Yes/No flags, but avoids too many dummy variables.
-
 switrs_reduced <- switrs_reduced %>%
   mutate(
     lighting_group = case_when(
@@ -841,9 +768,6 @@ cat("Grouped variables added: lighting_group, weather_group\n")
 
 # School-zone / school-bus proxy
 ```{r}
-# What: Create a proxy for school-zone-related context.
-# Why: The proposal identifies "approaching/leaving school bus" as the closest school-zone proxy.
-
 switrs_reduced <- switrs_reduced %>%
   mutate(
     school_bus_proxy = case_when(
@@ -860,10 +784,6 @@ cat("Added school_bus_proxy\n")
 
 # Additional subgroup interaction variables
 ```{r}
-# What: Create a small set of policy-relevant subgroup interactions.
-# Why: These directly support questions like "what's happening at intersections?"
-#      and "are nighttime highway crashes especially severe?"
-
 switrs_reduced <- switrs_reduced %>%
   mutate(
     intersection_ped = case_when(
@@ -886,9 +806,6 @@ cat("Added subgroup interaction variables: intersection_ped, highway_night\n")
 
 # HYPOTHESIS TEST (ONE-SIDED): Weekend has higher Severe/Fatal rate than Weekday
 ```{r}
-# What: Test whether the Severe/Fatal proportion is higher on weekends vs weekdays.
-# Why: This answers the directional policy question (“which is worse?”) using a formal one-sided test.
-
 if (!all(c("weekend", "SevereBinary") %in% names(switrs_reduced))) {
   stop("Need 'weekend' and 'SevereBinary' in switrs_reduced. Run the feature engineering + outcome chunks first.")
 }
@@ -901,7 +818,6 @@ df_wk <- switrs_reduced %>%
   ) %>%
   dplyr::filter(weekend %in% c("Weekend", "Weekday"))
 
-# Counts
 n_weekend <- sum(df_wk$weekend == "Weekend")
 n_weekday <- sum(df_wk$weekend == "Weekday")
 
@@ -924,7 +840,6 @@ cat("  Weekend: n =", n_weekend, "| severe =", x_weekend, "| p̂ =", round(p_wee
 cat("  Weekday: n =", n_weekday, "| severe =", x_weekday, "| p̂ =", round(p_weekday, 4), "\n")
 cat("\nDifference (Weekend - Weekday) =", round(diff_pp, 3), "percentage points\n")
 
-# One-sided prop test (approx z-test; no continuity correction)
 test_wk <- suppressWarnings(
   prop.test(
     x = c(x_weekend, x_weekday),
@@ -946,24 +861,15 @@ if (!is.na(test_wk$p.value) && test_wk$p.value < 0.05) {
 
 # Hypothesis testing continued: Severe/Fatal vs Other for all predictors (or as many as possible)
 ```{r}
-# What: Run appropriate tests for every column vs SevereBinary.
-# Why: Professor request: hypothesis tests for all variables (or as many as we can).
-
-# ----------------------------
-# Configuration knobs
-# ----------------------------
-max_levels <- 60     # skip categorical predictors with > this many unique levels
-chisq_B    <- 2000   # simulation reps when expected counts are small
+max_levels <- 60
+chisq_B    <- 2000
 min_n_per_group <- 10
-verbose_per_var <- TRUE   # TRUE = print blocks like your screenshot; FALSE = summary only
+verbose_per_var <- TRUE
 
 if (!exists("switrs_reduced")) stop("switrs_reduced not found.")
 if (!("SevereBinary" %in% names(switrs_reduced))) stop("SevereBinary not found in switrs_reduced.")
 if (!exists("leakage_vars")) leakage_vars <- character(0)
 
-# ----------------------------
-# Choose variables: ALL columns except outcome/leakage and obvious IDs
-# ----------------------------
 exclude_always <- c(
   "SevereBinary",
   "CASE_ID",
@@ -975,9 +881,6 @@ exclude_always <- c(
 vars_all <- setdiff(names(switrs_reduced), unique(c(exclude_always, leakage_vars)))
 cat("Total candidate variables to test:", length(vars_all), "\n")
 
-# ----------------------------
-# Label rownames for printing ONLY (does not change counts/levels)
-# ----------------------------
 label_rows_if_available <- function(var_name, tab) {
   if (exists("legend_maps") && exists("lookup_meaning") && var_name %in% names(legend_maps)) {
     rn <- rownames(tab)
@@ -986,9 +889,6 @@ label_rows_if_available <- function(var_name, tab) {
   tab
 }
 
-# ----------------------------
-# Main test runner (one variable)
-# ----------------------------
 test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereBinary") {
 
   df <- data %>%
@@ -998,7 +898,6 @@ test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereB
   df[[outcome]] <- factor(df[[outcome]], levels = c("Other","Severe/Fatal"))
   x <- df[[var_name]]
 
-  # Skip all-missing
   if (all(is.na(x))) {
     if (verbose_per_var) {
       cat("\n============================================================\n")
@@ -1011,15 +910,11 @@ test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereB
                           n_used = 0L, note = "All missing"))
   }
 
-  # Treat numeric 0/1 (or 2 unique values) as categorical
   if (is.numeric(x) || is.integer(x)) {
     ux <- unique(x[is.finite(x)])
     if (length(ux) <= 2) x <- as.factor(x)
   }
 
-  # -------------------------
-  # NUMERIC: Welch t-test + Wilcoxon (FIXED)
-  # -------------------------
   if (is.numeric(x) || is.integer(x)) {
     df2 <- df %>%
       dplyr::mutate(x_num = as.numeric(.data[[var_name]])) %>%
@@ -1047,7 +942,6 @@ test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereB
                             n_used = nrow(df2), note = "Too few observations in one group"))
     }
 
-    # FIX: create a real grouping column for formula methods
     df2$g <- df2[[outcome]]
 
     tt <- tryCatch(t.test(x_num ~ g, data = df2, var.equal = FALSE), error = function(e) NULL)
@@ -1069,9 +963,6 @@ test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereB
     ))
   }
 
-  # -------------------------
-  # CATEGORICAL: 2-level prop.test; 3+ chi-square
-  # -------------------------
   x_chr <- normalize_not_stated(x, blank_to_notstated = TRUE)
   df2 <- df %>% dplyr::mutate(x = x_chr) %>% dplyr::filter(!is.na(x))
 
@@ -1112,7 +1003,6 @@ test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereB
     cat("\n")
   }
 
-  # 2-level => two-proportion test
   if (nrow(tab) == 2) {
     x_succ <- tab[, "Severe/Fatal"]
     n_tot  <- rowSums(tab)
@@ -1131,7 +1021,6 @@ test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereB
     ))
   }
 
-  # 3+ levels => chi-square; simulate if small expected
   cs0 <- suppressWarnings(chisq.test(tab))
   use_sim <- any(cs0$expected < 5)
   cs <- if (use_sim) suppressWarnings(chisq.test(tab, simulate.p.value = TRUE, B = chisq_B)) else cs0
@@ -1149,9 +1038,6 @@ test_one_var_all <- function(var_name, data = switrs_reduced, outcome = "SevereB
   )
 }
 
-# ----------------------------
-# Run all tests + summary (like previous version)
-# ----------------------------
 results_all <- purrr::map_dfr(vars_all, ~ test_one_var_all(.x))
 
 results_all <- results_all %>%
@@ -1172,23 +1058,18 @@ print(results_all %>% dplyr::filter(test == "SKIP") %>% dplyr::count(note, sort 
 
 # Month and seasonality panel (feature engineering and storyboard-ready rate plot)
 ```{r}
-# TIME: Robust collision_date parsing + month seasonality panel (REPLACE ENTIRE CHUNK)
-# What: Parse COLLISION_DATE safely, then derive month features and summarize Severe/Fatal rate by month.
-# Why: Avoids all-NA date parsing failures and produces a single storyboard-ready seasonality panel.
-
 if (!("COLLISION_DATE" %in% names(switrs_reduced))) {
   stop("COLLISION_DATE not found in switrs_reduced.")
 }
 
-# Robust parser for common SWITRS export formats
 parse_date_multi <- function(x) {
   x <- as.character(x)
   x <- trimws(x)
   x[x %in% c("", "Not Stated", "UNKNOWN", "NA", "N/A", "NULL", "null")] <- NA_character_
 
-  d1 <- suppressWarnings(as.Date(x, format = "%Y%m%d"))     # 20240123
-  d2 <- suppressWarnings(as.Date(x, format = "%Y-%m-%d"))   # 2024-01-23
-  d3 <- suppressWarnings(as.Date(x, format = "%m/%d/%Y"))   # 01/23/2024
+  d1 <- suppressWarnings(as.Date(x, format = "%Y%m%d"))
+  d2 <- suppressWarnings(as.Date(x, format = "%Y-%m-%d"))
+  d3 <- suppressWarnings(as.Date(x, format = "%m/%d/%Y"))
 
   out <- d1
   out[is.na(out)] <- d2[is.na(out)]
@@ -1196,20 +1077,17 @@ parse_date_multi <- function(x) {
   out
 }
 
-# Create/overwrite collision_date
 switrs_reduced$collision_date <- parse_date_multi(switrs_reduced$COLLISION_DATE)
 
 cat("collision_date parsed % = ",
     round(mean(!is.na(switrs_reduced$collision_date)) * 100, 2), "%\n", sep = "")
 
-# Derive month features
 switrs_reduced <- switrs_reduced %>%
   dplyr::mutate(
     month = as.integer(format(collision_date, "%m")),
     month_name = factor(month.abb[month], levels = month.abb, ordered = TRUE)
   )
 
-# Month severity-rate table
 month_tbl <- switrs_reduced %>%
   dplyr::filter(!is.na(SevereBinary), !is.na(month_name)) %>%
   dplyr::group_by(month_name) %>%
@@ -1224,7 +1102,6 @@ month_tbl <- switrs_reduced %>%
 cat("Severe/Fatal rate per 100 crashes by month:\n")
 print(month_tbl)
 
-# Single storyboard-ready plot
 ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
   geom_col() +
   geom_text(aes(label = round(severe_per_100, 2)), vjust = -0.3, size = 3.5) +
@@ -1238,10 +1115,6 @@ ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
 
 # Statistics report chunk: Hypothesis tests on Severe/Fatal proportions (week 8 deliverable)
 ```{r}
-# What: Run two-proportion tests for Severe/Fatal rate differences across key groups.
-# Why: Produces a formal hypothesis test artifact aligned with the course requirement and client decisions.
-
-# ---- Helper: run a two-proportion test with a clean printed report ----
 two_prop_report <- function(data, group_var, group_a, group_b,
                             outcome_var = "SevereBinary",
                             outcome_success = "Severe/Fatal",
@@ -1306,7 +1179,6 @@ two_prop_report <- function(data, group_var, group_a, group_b,
   ))
 }
 
-# ---- Test 1: Weekend vs Weekday ----
 if ("weekend" %in% names(switrs_reduced)) {
   two_prop_report(
     data = switrs_reduced,
@@ -1319,10 +1191,7 @@ if ("weekend" %in% names(switrs_reduced)) {
   cat("\nSkipping Test 1: 'weekend' not found.\n")
 }
 
-# ---- Test 2: Rain vs Clear (WEATHER_1) ----
-# Codebook: WEATHER_1 A=Clear, C=Raining
 if ("WEATHER_1" %in% names(switrs_reduced)) {
-
   df_weather <- switrs_reduced %>%
     dplyr::mutate(
       WEATHER_1 = trimws(as.character(WEATHER_1)),
@@ -1335,19 +1204,15 @@ if ("WEATHER_1" %in% names(switrs_reduced)) {
   two_prop_report(
     data = df_weather,
     group_var = "WEATHER_1",
-    group_a = "C",   # Raining
-    group_b = "A",   # Clear
+    group_a = "C",
+    group_b = "A",
     title = "Raining (WEATHER_1=C) vs Clear (WEATHER_1=A)"
   )
-
 } else {
   cat("\nSkipping Test 2: 'WEATHER_1' not found.\n")
 }
 
-# ---- Test 3: Night×DUI proxy (interaction) vs not ----
-# Uses engineered factor night_dui = Yes/No if our time-feature chunk ran.
 if ("night_dui" %in% names(switrs_reduced)) {
-
   df_nd <- switrs_reduced %>%
     dplyr::mutate(night_dui = as.character(night_dui)) %>%
     dplyr::filter(night_dui %in% c("Yes","No"))
@@ -1359,7 +1224,6 @@ if ("night_dui" %in% names(switrs_reduced)) {
     group_b = "No",
     title = "Night × DUI proxy (night_dui=Yes) vs Not (night_dui=No)"
   )
-
 } else {
   cat("\nSkipping Test 3: 'night_dui' not found (re-run the time-feature chunk if needed).\n")
 }
@@ -1367,16 +1231,9 @@ if ("night_dui" %in% names(switrs_reduced)) {
 
 # Statistics report (add-on):Dark vs Daylight, Alcohol vs No Alcohol, Rain×Speeding
 ```{r}
-# What: Add two-proportion tests tied to operational decisions and compound-risk conditions.
-# Why: These map directly to interventions (night visibility, DUI enforcement, wet-weather speed control).
-
-# Reuse two_prop_report() from prior chunk
 if (!exists("two_prop_report")) stop("two_prop_report() not found. Run the main Statistics Report chunk first.")
 
-# ---- Test 4: Dark vs Daylight (LIGHTING) ----
-# Codebook: A=Daylight, B=Dusk/Dawn, C/D/E=Dark variants (exclude B for clean contrast)
 if ("LIGHTING" %in% names(switrs_reduced)) {
-
   df_light <- switrs_reduced %>%
     dplyr::filter(!is.na(SevereBinary)) %>%
     dplyr::mutate(
@@ -1395,15 +1252,11 @@ if ("LIGHTING" %in% names(switrs_reduced)) {
     group_b = "Daylight",
     title = "Dark (LIGHTING=C/D/E) vs Daylight (LIGHTING=A)"
   )
-
 } else {
   cat("\nSkipping Test 4: 'LIGHTING' not found.\n")
 }
 
-# ---- Test 5: Alcohol involved vs not (ALCOHOL_INVOLVED) ----
-# our cleaning should yield N/Y/Not Stated; we restrict to N vs Y for a clean 2-group test
 if ("ALCOHOL_INVOLVED" %in% names(switrs_reduced)) {
-
   df_alc <- switrs_reduced %>%
     dplyr::filter(!is.na(SevereBinary)) %>%
     dplyr::mutate(
@@ -1422,15 +1275,11 @@ if ("ALCOHOL_INVOLVED" %in% names(switrs_reduced)) {
     group_b = "No Alcohol",
     title = "Alcohol involved vs Not alcohol involved"
   )
-
 } else {
   cat("\nSkipping Test 5: 'ALCOHOL_INVOLVED' not found.\n")
 }
 
-# ---- Test 6: Rain × Unsafe Speed proxy (interaction) vs not ----
-# Uses engineered factor rain_speed = Yes/No if our time-feature chunk ran.
 if ("rain_speed" %in% names(switrs_reduced)) {
-
   df_rs <- switrs_reduced %>%
     dplyr::mutate(rain_speed = as.character(rain_speed)) %>%
     dplyr::filter(rain_speed %in% c("Yes","No"))
@@ -1442,7 +1291,6 @@ if ("rain_speed" %in% names(switrs_reduced)) {
     group_b = "No",
     title = "Rain × Unsafe speed proxy (rain_speed=Yes) vs Not (rain_speed=No)"
   )
-
 } else {
   cat("\nSkipping Test 6: 'rain_speed' not found (re-run the time-feature chunk if needed).\n")
 }
@@ -1450,12 +1298,8 @@ if ("rain_speed" %in% names(switrs_reduced)) {
 
 # Statistics report (subgroups): newly added subgroup variables
 ```{r}
-# What: Add two-proportion tests for the new subgroup variables we engineered.
-# Why: These are policy-facing subgroup conditions added after the main model cleanup.
-
 if (!exists("two_prop_report")) stop("two_prop_report() not found. Run the main Statistics Report chunk first.")
 
-# Helper: standardize a binary subgroup variable into Yes/No and run the test
 run_subgroup_prop_test <- function(data, var_name, title_text) {
 
   if (!var_name %in% names(data)) {
@@ -1490,31 +1334,26 @@ run_subgroup_prop_test <- function(data, var_name, title_text) {
   )
 }
 
-# Save outputs if we want to reference them later
 subgroup_test_results <- list()
 
-# ---- Test 7: Friday night vs not ----
 subgroup_test_results$friday_night <- run_subgroup_prop_test(
   switrs_reduced,
   "friday_night",
   "Friday night (friday_night=Yes) vs Not (friday_night=No)"
 )
 
-# ---- Test 8: School bus proxy vs not ----
 subgroup_test_results$school_bus_proxy <- run_subgroup_prop_test(
   switrs_reduced,
   "school_bus_proxy",
   "School bus proxy (school_bus_proxy=Yes) vs Not (school_bus_proxy=No)"
 )
 
-# ---- Test 9: Intersection × pedestrian vs not ----
 subgroup_test_results$intersection_ped <- run_subgroup_prop_test(
   switrs_reduced,
   "intersection_ped",
   "Intersection × pedestrian (intersection_ped=Yes) vs Not (intersection_ped=No)"
 )
 
-# ---- Test 10: Highway × night vs not ----
 subgroup_test_results$highway_night <- run_subgroup_prop_test(
   switrs_reduced,
   "highway_night",
@@ -1524,20 +1363,11 @@ subgroup_test_results$highway_night <- run_subgroup_prop_test(
 
 # Scenario Ranking (top combinations & rates & counts)
 ```{r}
-# What: Build interpretable “scenario” groups from time + environment + impairment + pedestrian context,
-#       then rank by severe/fatal RATE (risk intensity) and COUNT (severe/fatal burden).
-# Why:  This directly answers the client’s decision question: “When and under what conditions should we focus
-#       to save the most lives?” Rates identify high-risk contexts; counts identify where impact is largest.
-
-# ---- 1) Build scenario fields (robust to missing columns) ----
 df_scen <- switrs_reduced %>%
   dplyr::filter(!is.na(SevereBinary)) %>%
   dplyr::mutate(
-    # TIME features (already derived earlier)
     time_bucket = if ("time_bucket" %in% names(.)) as.character(time_bucket) else NA_character_,
     weekend     = if ("weekend" %in% names(.)) as.character(weekend) else NA_character_,
-
-    # LIGHT: clean contrast Daylight vs Dark (exclude dusk/dawn + not stated for interpretability)
     light = if ("LIGHTING" %in% names(.)) {
       x <- trimws(as.character(LIGHTING))
       dplyr::case_when(
@@ -1546,10 +1376,8 @@ df_scen <- switrs_reduced %>%
         TRUE ~ NA_character_
       )
     } else NA_character_,
-
-    # PEDESTRIAN: use engineered is_ped if present; else fall back to PEDESTRIAN_ACCIDENT
     ped = if ("is_ped" %in% names(.)) {
-      x <- as.character(is_ped)  # engineered factor: No/Yes
+      x <- as.character(is_ped)
       dplyr::case_when(
         x %in% c("Yes","No") ~ x,
         TRUE ~ NA_character_
@@ -1562,47 +1390,36 @@ df_scen <- switrs_reduced %>%
         TRUE ~ NA_character_
       )
     } else NA_character_,
-
-    # IMPAIRMENT SIGNAL: combine crash-level alcohol + PCF DUI proxy (keeps scenario interpretable)
-    # What: Collapse to a single Yes/No indicator.
-    # Why: Prevents over-fragmenting scenarios while still capturing impairment risk.
     alc_yesno = if ("ALCOHOL_INVOLVED" %in% names(.)) {
-      x <- trimws(as.character(ALCOHOL_INVOLVED))  # N/Y/Not Stated
+      x <- trimws(as.character(ALCOHOL_INVOLVED))
       dplyr::case_when(
         x == "Y" ~ "Yes",
         x == "N" ~ "No",
         TRUE ~ NA_character_
       )
     } else NA_character_,
-
     dui_yesno = if ("pcf_dui" %in% names(.)) {
-      x <- as.character(pcf_dui) # engineered factor: No/Yes
+      x <- as.character(pcf_dui)
       dplyr::case_when(
         x %in% c("Yes","No") ~ x,
         TRUE ~ NA_character_
       )
     } else NA_character_,
-
     impairment = dplyr::case_when(
       alc_yesno == "Yes" | dui_yesno == "Yes" ~ "Yes",
       alc_yesno == "No"  & dui_yesno == "No"  ~ "No",
-      # if one is missing but the other says Yes, we already catch it above
       TRUE ~ NA_character_
     ),
-
-    # OPTIONAL modifiers (kept for an add-on table below)
     rain = if ("is_rain" %in% names(.)) {
       x <- as.character(is_rain)
       dplyr::case_when(x %in% c("Yes","No") ~ x, TRUE ~ NA_character_)
     } else NA_character_,
-
     speed = if ("pcf_speed" %in% names(.)) {
       x <- as.character(pcf_speed)
       dplyr::case_when(x %in% c("Yes","No") ~ x, TRUE ~ NA_character_)
     } else NA_character_
   )
 
-# ---- 2) Core scenario dimensions (kept intentionally small for stable denominators) ----
 scenario_vars <- c("time_bucket","weekend","light","impairment","ped")
 scenario_vars <- scenario_vars[scenario_vars %in% names(df_scen)]
 
@@ -1612,7 +1429,6 @@ df_scen2 <- df_scen %>%
 cat("Rows with complete CORE scenario fields:", nrow(df_scen2), "\n")
 cat("Scenario dimensions used:", paste(scenario_vars, collapse = ", "), "\n")
 
-# ---- 3) Create scenario label and rank ----
 df_rank <- df_scen2 %>%
   dplyr::mutate(
     scenario = paste(
@@ -1633,8 +1449,6 @@ df_rank <- df_scen2 %>%
     .groups = "drop"
   )
 
-# ---- 4) Two views: by count and by rate (thresholds tuned for stability) ----
-# By COUNT: identifies largest severe/fatal burden scenarios (deployment impact)
 min_crashes_count <- 30
 
 top_by_count <- df_rank %>%
@@ -1642,11 +1456,10 @@ top_by_count <- df_rank %>%
   dplyr::arrange(dplyr::desc(severe_n), dplyr::desc(n_crashes))
 
 cat("\nTop 15 scenarios by Severe/Fatal COUNT",
-    "(min_crashes=", min_crashes_count, "):\n", sep = "")
+    "(min_crashes=", min_crashes_count, "): \n", sep = "")
 print(head(top_by_count, 15))
 cat("\nScenarios meeting COUNT filter:", nrow(top_by_count), "\n")
 
-# By RATE: identifies highest-risk intensity scenarios (targeted intervention)
 min_crashes_rate <- 15
 min_severe_rate  <- 1
 
@@ -1655,13 +1468,10 @@ top_by_rate <- df_rank %>%
   dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
 
 cat("\nTop 15 scenarios by Severe/Fatal RATE",
-    "(min_crashes=", min_crashes_rate, ", min_severe=", min_severe_rate, "):\n", sep = "")
+    "(min_crashes=", min_crashes_rate, ", min_severe=", min_severe_rate, "): \n", sep = "")
 print(head(top_by_rate, 15))
 cat("\nScenarios meeting RATE filter:", nrow(top_by_rate), "\n")
 
-# ---- 5) Add-on: Interaction flags (quick operational signal checks) ----
-# What: Summarize Severe/Fatal rate for engineered interaction terms (Yes vs No).
-# Why: These directly operationalize “compound risk conditions” (Night×DUI, Rain×Speeding, Ped×Dark).
 interaction_vars <- intersect(c("night_dui","rain_speed","ped_dark"), names(switrs_reduced))
 
 if (length(interaction_vars) > 0) {
@@ -1686,11 +1496,9 @@ if (length(interaction_vars) > 0) {
   cat("\nNo interaction variables found (night_dui/rain_speed/ped_dark). If we added the time-feature chunk, re-run it.\n")
 }
 ```
+
 # report_data_structure_and_descriptives
 ```{r, message=FALSE, warning=FALSE}
-# What: Create report-ready tables for data structure and descriptive statistics.
-# Why: The rubric explicitly asks for rows/columns, feature types, central tendency, and variability.
-
 raw_df_for_report <- if (exists("switrs")) switrs else switrs_reduced
 
 count_storage_types <- function(df) {
@@ -1868,7 +1676,6 @@ base_theme_fix <- theme(
   panel.grid.minor = element_blank()
 )
 
-# ---- Panel 1: Top Hotspots by Severe/Fatal COUNT ----
 if (exists("hotspots_by_count") && nrow(hotspots_by_count) > 0) {
 
   p1 <- hotspots_by_count %>%
@@ -1891,7 +1698,6 @@ if (exists("hotspots_by_count") && nrow(hotspots_by_count) > 0) {
   cat("hotspots_by_count not found or empty — run the hotspots chunk first.\n")
 }
 
-# ---- Panel 2: Top Scenarios by Severe/Fatal RATE ----
 if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
 
   p2 <- top_by_rate %>%
@@ -1915,9 +1721,6 @@ if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
   cat("top_by_rate not found or empty — run the scenario ranking chunk first.\n")
 }
 
-# ---- Panel 3: Interaction Terms (Yes vs No) ----
-# What: Compare Severe/Fatal rates for engineered interaction conditions.
-# Why: These are “compound risk” signals (e.g., Night×DUI) that support targeted action.
 interaction_vars <- intersect(c("night_dui","rain_speed","ped_dark"), names(switrs_reduced))
 
 if (length(interaction_vars) > 0) {
@@ -1968,25 +1771,17 @@ if (length(interaction_vars) > 0) {
 
 # codebook label dictionaries
 ```{r}
-# What: Map SWITRS codes -> human-readable labels (used in plots + contingency tables).
-# Why: Lets tables/plots display meanings instead of raw codes.
-
 lookup_meaning <- function(x, legend_vec) {
-  # x: raw codes; legend_vec: named vector mapping code -> meaning
   x0 <- normalize_not_stated(x, blank_to_notstated = TRUE)
 
-  # exact match
   out <- unname(legend_vec[x0])
 
-  # if missing, try left-pad to width 2 for numeric-looking codes (e.g., PCF_VIOL_CATEGORY)
   needs_pad <- is.na(out) & grepl("^[0-9]+$", x0)
   x2 <- x0
   x2[needs_pad] <- sprintf("%02d", as.integer(x0[needs_pad]))
   out2 <- unname(legend_vec[x2])
 
   out[is.na(out)] <- out2[is.na(out)]
-
-  # fallback to original code if still missing
   out[is.na(out) | out == ""] <- x0[is.na(out) | out == ""]
   out
 }
@@ -1997,8 +1792,6 @@ legend_maps <- list(
     "5"="Friday","6"="Saturday","7"="Sunday",
     "Not Stated"="Not Stated"
   ),
-
-  # INCLUDED : LIGHTING
   LIGHTING = c(
     "A"="Daylight",
     "B"="Dusk - Dawn",
@@ -2007,23 +1800,19 @@ legend_maps <- list(
     "E"="Dark - Street Lights Not Functioning",
     "Not Stated"="Not Stated"
   ),
-
   WEATHER_1 = c(
     "A"="Clear","B"="Cloudy","C"="Raining","D"="Snowing","E"="Fog","F"="Other","G"="Wind",
     "Not Stated"="Not Stated"
   ),
-
   ROAD_SURFACE = c(
     "A"="Dry","B"="Wet","C"="Snowy or Icy","D"="Slippery (Muddy/Oily/etc.)",
     "Not Stated"="Not Stated"
   ),
-
   INTERSECTION = c(
     "Y"="Yes","N"="No",
     "1"="Yes","0"="No",
     "Not Stated"="Not Stated"
   ),
-
   PRIMARY_COLL_FACTOR = c(
     "A"="Code Violation",
     "B"="Other Improper Driving",
@@ -2032,8 +1821,6 @@ legend_maps <- list(
     "E"="Fell Asleep",
     "Not Stated"="Not Stated"
   ),
-
-  # INCLUDED : TYPE_OF_COLLISION
   TYPE_OF_COLLISION = c(
     "A"="Head-On",
     "B"="Sideswipe",
@@ -2045,7 +1832,6 @@ legend_maps <- list(
     "H"="Other",
     "Not Stated"="Not Stated"
   ),
-
   PCF_VIOL_CATEGORY = c(
     "01"="DUI (Alcohol/Drug)",
     "02"="Impeding Traffic",
@@ -2072,36 +1858,28 @@ legend_maps <- list(
     "00"="Unknown",
     "Not Stated"="Not Stated"
   ),
-
   HIT_AND_RUN = c(
     "F"="Felony",
     "M"="Misdemeanor",
     "N"="Not Hit and Run",
     "Not Stated"="Not Stated"
   ),
-
-  # INCLUDED : PEDESTRIAN_ACCIDENT
   PEDESTRIAN_ACCIDENT = c(
     "Y"="Yes","N"="No",
     "1"="Yes","0"="No",
     "Not Stated"="Not Stated"
   ),
-
-  # INCLUDED : MOTORCYCLE_ACCIDENT
   MOTORCYCLE_ACCIDENT = c(
     "Y"="Yes","N"="No",
     "1"="Yes","0"="No",
     "Not Stated"="Not Stated"
   ),
-
-  # INCLUDED : ANY_PARTY_DRUG
   ANY_PARTY_DRUG = c(
     "Y"="Yes","N"="No",
     "1"="Yes","0"="No",
     "Not Stated"="Not Stated"
   )
 )
-# --- Add/override legends for requested variables (minimal patch) ---
 
 legend_maps$TYPE_OF_COLLISION <- c(
   "A"="Head-On",
@@ -2134,7 +1912,6 @@ legend_maps$MOTORCYCLE_ACCIDENT <- c(
   "Not Stated"="Not Stated"
 )
 
-# Party aggregate name varies by our merge; support both:
 legend_maps$ANY_PARTY_DRUG <- c(
   "1"="Yes","0"="No","Y"="Yes","N"="No",
   "Not Stated"="Not Stated"
@@ -2161,10 +1938,6 @@ print_legend <- function(var_name, dedupe_meaning = TRUE) {
 
 # EDA: Severity rate table for key categorical variables
 ```{r}
-# What: Compute severe rate per 100 crashes by category for a set of variables.
-# Why: Decision-oriented EDA: rates are more comparable than raw counts across uneven category sizes.
-#      Includes engineered risk flags + interaction terms to show merged-data value-add.
-
 severity_rate_table <- function(data, var) {
   if (!var %in% names(data)) return(NULL)
 
@@ -2173,7 +1946,6 @@ severity_rate_table <- function(data, var) {
     dplyr::mutate(v = as.character(.data[[var]])) %>%
     dplyr::mutate(v = ifelse(is.na(v) | v == "", "Not Stated", v))
 
-  # Optional: label coded variables for readability (while keeping original codes)
   if (var %in% names(legend_maps)) {
     map <- legend_maps[[var]]
     df <- df %>% mutate(v_label = dplyr::recode(v, !!!map, .default = v))
@@ -2194,25 +1966,17 @@ severity_rate_table <- function(data, var) {
     arrange(desc(severe_per_100), desc(n))
 }
 
-# Include both raw crash fields and engineered flags/interactions (only kept if present)
 eda_vars <- intersect(
   c(
-    # time / environment
     "DAY_OF_WEEK","time_bucket","weekend","night",
     "WEATHER_1","is_rain",
     "LIGHTING","is_dark",
     "ROAD_SURFACE",
-    
-    # roadway / crash type
     "INTERSECTION","STATE_HWY_IND","TYPE_OF_COLLISION","PRIMARY_COLL_FACTOR",
     "PCF_VIOL_CATEGORY","pcf_dui","pcf_speed",
     "HIT_AND_RUN",
-
-    # crash flags
     "ALCOHOL_INVOLVED",
     "PEDESTRIAN_ACCIDENT","BICYCLE_ACCIDENT","MOTORCYCLE_ACCIDENT","TRUCK_ACCIDENT",
-
-    # interaction terms (proposal-aligned)
     "night_dui","rain_speed","ped_dark"
   ),
   names(switrs_reduced)
@@ -2221,27 +1985,19 @@ eda_vars <- intersect(
 rate_tables <- purrr::map(eda_vars, ~ severity_rate_table(switrs_reduced, .x))
 names(rate_tables) <- eda_vars
 
-# Show a quick preview of the first few tables
 rate_tables[1:min(6, length(rate_tables))]
 ```
 
 # EDA: Decision-oriented severity rate plots (ordered, horizontal)
 ```{r}
-# EDA: Decision-oriented severity rate plots (ordered, horizontal)
-# What: Plot Severe/Fatal share by categorical variables as normalized stacked bars (horizontal).
-# Why: Client-ready comparisons: proportions highlight risk composition instead of just volume.
-#      Includes engineered flags + interaction terms to demonstrate merged-data value-add.
-
 plot_severity_by_variable <- function(var_name,
                                       data = switrs_reduced,
                                       fill_var = "SevereBinary") {
 
   if (!var_name %in% names(data)) return(NULL)
 
-  # Make legend stable across plots
   data[[fill_var]] <- factor(data[[fill_var]], levels = c("Other", "Severe/Fatal"))
 
-  # Build summarized frame (codes preserved in x_code)
   df <- data %>%
     dplyr::filter(!is.na(.data[[fill_var]])) %>%
     dplyr::transmute(
@@ -2256,7 +2012,6 @@ plot_severity_by_variable <- function(var_name,
     ) %>%
     dplyr::ungroup()
 
-  # Order bars by Severe/Fatal share (descending), tie-break by n
   ordering <- df %>%
     dplyr::group_by(x_code) %>%
     dplyr::summarise(
@@ -2269,7 +2024,6 @@ plot_severity_by_variable <- function(var_name,
 
   df$x_code <- factor(df$x_code, levels = ordering)
 
-  # Axis label function: if a legend exists, show meaning; else show the code
   label_fun <- function(x) {
     if (exists("legend_maps") && var_name %in% names(legend_maps)) {
       out <- lookup_meaning(x, legend_maps[[var_name]])
@@ -2294,8 +2048,8 @@ plot_severity_by_variable <- function(var_name,
     scale_x_discrete(labels = label_fun) +
     scale_fill_manual(
       values = c(
-        "Other" = "#A8D5BA",         # soft green
-        "Severe/Fatal" = "#1B5E20"   # forest green
+        "Other" = "#A8D5BA",
+        "Severe/Fatal" = "#1B5E20"
       ),
       drop = FALSE
     ) +
@@ -2315,30 +2069,19 @@ plot_severity_by_variable <- function(var_name,
 
   print(p)
 
-  # Print legend mapping only for coded variables
   if (exists("print_legend") && exists("legend_maps") && var_name %in% names(legend_maps)) {
     print_legend(var_name)
   }
 }
 
-# Choose a manageable set to render (includes engineered flags + interactions if present)
 vars_to_plot <- intersect(
   c(
-    # when
     "time_bucket","weekend","night",
-
-    # environment
     "WEATHER_1","is_rain",
     "LIGHTING","is_dark",
     "ROAD_SURFACE",
-
-    # roadway / crash type
     "INTERSECTION","STATE_HWY_IND","TYPE_OF_COLLISION","PRIMARY_COLL_FACTOR",
-
-    # violations / risk proxies
     "PCF_VIOL_CATEGORY","pcf_dui","pcf_speed",
-
-    # proposal-aligned interactions (high-value)
     "night_dui","rain_speed","ped_dark"
   ),
   names(switrs_reduced)
@@ -2349,17 +2092,13 @@ purrr::walk(vars_to_plot, ~ plot_severity_by_variable(.x))
 
 # Correlation Check (numeric predictors)
 ```{r}
-# What: Correlation scan among numeric predictors.
-# Why: Highly collinear predictors can destabilize regression coefficients and interpretation.
-
 num_vars <- names(switrs_reduced)[sapply(switrs_reduced, is.numeric)]
-num_vars <- setdiff(num_vars, c("ACCIDENT_YEAR"))  # often redundant with derived year
+num_vars <- setdiff(num_vars, c("ACCIDENT_YEAR"))
 
 if (length(num_vars) >= 2) {
   cor_matrix <- cor(switrs_reduced[num_vars], use = "pairwise.complete.obs")
   corrplot(cor_matrix, method = "color", type = "lower", tl.cex = 0.6)
 
-  # Report high/moderate correlations
   high_corr <- c()
   moderate_corr <- c()
 
@@ -2383,18 +2122,80 @@ if (length(num_vars) >= 2) {
 }
 ```
 
-# Shared train/test split
-```{r shared_train_test_split, message=FALSE, warning=FALSE}
-# What: Create one shared stratified train/test split for all downstream models.
-# Why: Ensures every model is evaluated on the exact same rows.
+# Shared imputation
+```{r shared_imputation, message=FALSE, warning=FALSE}
+if (!exists("switrs_reduced")) stop("switrs_reduced not found.")
 
-set.seed(544)
+switrs_model_ready <- switrs_reduced
 
-if (!all(c("CASE_ID", "SevereBinary") %in% names(switrs_reduced))) {
-  stop("Need CASE_ID and SevereBinary in switrs_reduced before creating the shared split.")
+if ("SevereBinary" %in% names(switrs_model_ready)) {
+  switrs_model_ready <- switrs_model_ready %>%
+    dplyr::mutate(
+      SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
+    )
 }
 
-split_frame <- switrs_reduced %>%
+switrs_model_ready <- switrs_model_ready %>%
+  dplyr::mutate(across(where(is.character), as.factor))
+
+factor_cols <- names(switrs_model_ready)[sapply(switrs_model_ready, is.factor)]
+factor_cols <- setdiff(factor_cols, "SevereBinary")
+
+if (length(factor_cols) > 0) {
+  switrs_model_ready[factor_cols] <- lapply(
+    switrs_model_ready[factor_cols],
+    function(x) forcats::fct_explicit_na(x, na_level = "Not Stated")
+  )
+}
+
+numeric_cols <- names(switrs_model_ready)[sapply(switrs_model_ready, function(x) is.numeric(x) || is.integer(x))]
+numeric_cols <- setdiff(numeric_cols, "CASE_ID")
+
+shared_numeric_medians <- setNames(vector("list", length(numeric_cols)), numeric_cols)
+
+for (v in numeric_cols) {
+  miss_name <- paste0(v, "_miss")
+
+  switrs_model_ready[[miss_name]] <- as.integer(is.na(switrs_model_ready[[v]]))
+
+  med <- suppressWarnings(median(switrs_model_ready[[v]], na.rm = TRUE))
+  if (!is.finite(med)) med <- 0
+
+  shared_numeric_medians[[v]] <- med
+  switrs_model_ready[[v]][is.na(switrs_model_ready[[v]])] <- med
+}
+
+expand_predictors_with_miss <- function(df, predictors) {
+  predictors <- intersect(predictors, names(df))
+
+  numeric_base <- predictors[
+    sapply(df[predictors], function(x) is.numeric(x) || is.integer(x))
+  ]
+
+  unique(c(
+    predictors,
+    intersect(paste0(numeric_base, "_miss"), names(df))
+  ))
+}
+
+cat("Shared model-ready dataset created.\n")
+cat("Rows =", nrow(switrs_model_ready), "| Columns =", ncol(switrs_model_ready), "\n")
+cat("Remaining NA count =", sum(is.na(switrs_model_ready)), "\n")
+```
+
+# Shared train/test split
+```{r shared_train_test_split, message=FALSE, warning=FALSE}
+set.seed(544)
+
+if (!exists("switrs_model_ready")) {
+  stop("switrs_model_ready not found. Run the shared_imputation chunk first.")
+}
+
+if (!all(c("CASE_ID", "SevereBinary") %in% names(switrs_model_ready))) {
+  stop("Need CASE_ID and SevereBinary in switrs_model_ready before creating the shared split.")
+}
+
+split_frame <- switrs_model_ready %>%
   dplyr::select(CASE_ID, SevereBinary) %>%
   dplyr::filter(!is.na(CASE_ID), !is.na(SevereBinary)) %>%
   dplyr::distinct(CASE_ID, .keep_all = TRUE) %>%
@@ -2415,70 +2216,58 @@ shared_test_idx <- c(
 test_case_ids  <- split_frame$CASE_ID[shared_test_idx]
 train_case_ids <- setdiff(split_frame$CASE_ID, test_case_ids)
 
+train_data <- switrs_model_ready %>%
+  dplyr::filter(CASE_ID %in% train_case_ids)
+
+test_data <- switrs_model_ready %>%
+  dplyr::filter(CASE_ID %in% test_case_ids)
+
 cat("Shared split created.\n")
 cat("Train crashes =", length(train_case_ids), "| Test crashes =", length(test_case_ids), "\n")
+cat("Train rows =", nrow(train_data), "| Test rows =", nrow(test_data), "\n")
 cat("Shared test fraction =", round(length(test_case_ids) / nrow(split_frame), 4), "\n")
 ```
 
 # Baseline GLM modeling dataset
 ```{r}
-# What: Construct the baseline GLM modeling frame, reuse the shared split,
-#       fit the model, and report AUC + ORs.
-# Why: Keeps a single split across the notebook and makes the baseline model
-#      clearly identifiable.
-
 set.seed(544)
 
 baseline_glm_name <- "Baseline GLM"
 
-# ---- 1) Candidate predictors (deduplicated: keep one encoding per concept) ----
 if (!exists("leakage_vars")) leakage_vars <- character(0)
 
 candidate_predictors <- intersect(
   c(
-    # time
     "year",
     "day_group",
     "night",
     "friday_night",
-
-    # environment
     "weather_group",
     "lighting_group",
     "ROAD_SURFACE",
-
-    # roadway / crash context
     "INTERSECTION",
     "STATE_HWY_IND",
     "TYPE_OF_COLLISION",
     "PRIMARY_COLL_FACTOR",
     "school_bus_proxy",
-
-    # violation / impairment
     "pcf_dui",
     "pcf_speed",
     "ALCOHOL_INVOLVED",
     "HIT_AND_RUN",
-
-    # crash type flags
     "is_ped",
     "BICYCLE_ACCIDENT",
     "MOTORCYCLE_ACCIDENT",
     "TRUCK_ACCIDENT",
-
-    # engineered interactions
     "night_dui",
     "rain_speed",
     "ped_dark",
-
-    # party aggregates
     "n_parties",
     "any_party_alcohol",
     "any_party_drug",
     "any_party_at_fault",
     "mean_party_age"
   ),
-  names(switrs_reduced)
+  names(switrs_model_ready)
 )
 
 candidate_predictors <- setdiff(candidate_predictors, leakage_vars)
@@ -2502,51 +2291,23 @@ if (length(intersect(candidate_predictors, forbidden_redundant)) > 0) {
 cat(baseline_glm_name, "predictors:\n")
 print(candidate_predictors)
 
-# ---- 2) Build raw modeling frame ----
-baseline_glm_df_raw <- switrs_reduced %>%
-  dplyr::select(all_of(c("CASE_ID", "SevereBinary", candidate_predictors))) %>%
-  dplyr::filter(!is.na(SevereBinary)) %>%
-  dplyr::mutate(
-    SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
-  )
-
-# chars -> factor; explicit NA level for factors
-baseline_glm_df_raw <- baseline_glm_df_raw %>%
-  dplyr::mutate(across(where(is.character), as.factor)) %>%
-  dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
-
-# ---- 3) Full-data numeric imputation BEFORE split ----
-num_cols <- names(baseline_glm_df_raw)[sapply(baseline_glm_df_raw, is.numeric)]
-num_cols <- setdiff(num_cols, c("CASE_ID", "SevereBinary"))
-
-full_medians <- setNames(vector("list", length(num_cols)), num_cols)
-
-for (v in num_cols) {
-  miss_name <- paste0(v, "_miss")
-
-  baseline_glm_df_raw[[miss_name]] <- as.integer(is.na(baseline_glm_df_raw[[v]]))
-
-  med <- suppressWarnings(median(baseline_glm_df_raw[[v]], na.rm = TRUE))
-  if (is.na(med)) med <- 0
-
-  full_medians[[v]] <- med
-  baseline_glm_df_raw[[v]][is.na(baseline_glm_df_raw[[v]])] <- med
+if (!exists("train_data") || !exists("test_data")) {
+  stop("train_data/test_data not found. Run shared_imputation and shared_train_test_split first.")
+}
+if (!exists("expand_predictors_with_miss")) {
+  stop("expand_predictors_with_miss() not found. Run the shared_imputation chunk first.")
 }
 
-# ---- 4) Reuse the shared split ----
-if (!exists("train_case_ids") || !exists("test_case_ids")) {
-  stop("Shared split not found. Run the shared_train_test_split chunk first.")
-}
+baseline_predictors_final <- expand_predictors_with_miss(train_data, candidate_predictors)
 
-train_set_raw <- baseline_glm_df_raw %>%
-  dplyr::filter(CASE_ID %in% train_case_ids)
+train_set_raw <- train_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", baseline_predictors_final)))
 
-test_set_raw <- baseline_glm_df_raw %>%
-  dplyr::filter(CASE_ID %in% test_case_ids)
+test_set_raw <- test_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", baseline_predictors_final)))
 
 cat(baseline_glm_name, "raw split sizes: Train =", nrow(train_set_raw), "| Test =", nrow(test_set_raw), "\n")
 
-# ---- 5) Drop constant predictors based on TRAIN only ----
 is_constant_train <- sapply(train_set_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
   ux <- unique(x)
   ux <- ux[!is.na(ux)]
@@ -2562,7 +2323,6 @@ if (any(is_constant_train)) {
   test_set_raw  <- test_set_raw  %>% dplyr::select(all_of(keep_cols))
 }
 
-# ---- 6) Auto-detect practical separation on TRAIN only ----
 is_perfect_separator <- function(x, y, min_level_n = 30) {
   if (is.character(x) || is.factor(x)) {
     tab <- table(x, y, useNA = "no")
@@ -2606,19 +2366,16 @@ if (length(bad_vars) > 0) {
   test_set_raw  <- test_set_raw  %>% dplyr::select(-dplyr::all_of(bad_vars))
 }
 
-# ---- 7) Final model matrices ----
 train_set <- train_set_raw %>% dplyr::select(-CASE_ID)
 test_set  <- test_set_raw  %>% dplyr::select(-CASE_ID)
 
 cat("\nFinal", baseline_glm_name, "columns:\n")
 print(names(train_set))
 
-# Keep a combined object only for downstream reference if needed
 model_df_clean2 <- dplyr::bind_rows(train_set, test_set)
 
 cat(baseline_glm_name, "final split sizes: Train =", nrow(train_set), "| Test =", nrow(test_set), "\n")
 
-# ---- 8) Fit GLM (train only) ----
 baseline_glm_fit <- glm(
   SevereBinary ~ .,
   data = train_set,
@@ -2630,7 +2387,6 @@ glm_fit_final <- baseline_glm_fit
 
 cat(baseline_glm_name, "converged? ", baseline_glm_fit$converged, "\n", sep = "")
 
-# ---- 9) Predict + AUC + confusion matrix ----
 baseline_glm_test_phat <- as.numeric(predict(baseline_glm_fit, newdata = test_set, type = "response"))
 test_phat <- baseline_glm_test_phat
 test_y <- test_set$SevereBinary
@@ -2647,10 +2403,9 @@ print(table(Pred = pred_05, Truth = test_y))
 
 prev <- mean(train_set$SevereBinary == "Severe/Fatal")
 pred_prev <- factor(ifelse(baseline_glm_test_phat >= prev, "Severe/Fatal", "Other"), levels = levels(test_y))
-cat("\n", baseline_glm_name, "confusion matrix (cutoff=prevalence=", round(prev, 4), "):\n", sep = "")
+cat("\n", baseline_glm_name, "confusion matrix (cutoff=prevalence=", round(prev, 4), "): \n", sep = "")
 print(table(Pred = pred_prev, Truth = test_y))
 
-# ---- 10) Odds ratios (fast Wald CI) ----
 coefs <- summary(baseline_glm_fit)$coefficients
 or_tbl <- data.frame(
   term = rownames(coefs),
@@ -2676,10 +2431,6 @@ print(head(or_tbl, 20))
 
 # Coefficient analysis
 ```{r report_glm_coefficient_analysis, message=FALSE, warning=FALSE}
-# Coefficient analysis
-# What: Create cleaner odds-ratio tables from the fitted baseline logistic regression.
-# Why: The rubric asks for coefficient analysis, not only model accuracy.
-
 if (!exists("or_tbl")) stop("or_tbl not found. Run the baseline GLM chunk first.")
 
 coef_report_tbl <- or_tbl %>%
@@ -2726,21 +2477,13 @@ print(coef_decrease_tbl)
 
 # What-if / one-at-a-time probability changes (GLM)
 ```{r}
-# What: Build a "typical crash" baseline row, then vary one predictor while holding others fixed.
-# Why: Turns the model into an actionable simulator: "if we change X, how does risk move?"
-#      This version uses glm_fit_final$xlevels so predict() never sees invalid factor levels.
-
 if (!exists("glm_fit_final")) stop("glm_fit_final not found. Run the baseline GLM chunk first.")
 if (!exists("train_set")) stop("train_set not found. Run the baseline GLM chunk first.")
 
-# --- Reference predictor frame (exact columns used in the GLM) ---
 model_vars <- setdiff(names(train_set), "SevereBinary")
 X_ref <- train_set[, model_vars, drop = FALSE]
-
-# Factor levels known by the fitted model (source of truth for predict())
 model_xlev <- glm_fit_final$xlevels
 
-# --- Helpers ---
 mode_level <- function(x) {
   x <- x[!is.na(x)]
   if (length(x) == 0) return(NA_character_)
@@ -2751,11 +2494,9 @@ safe_predict_prob <- function(model, newdata) {
   as.numeric(suppressWarnings(predict(model, newdata = newdata, type = "response")))
 }
 
-# --- Build a baseline profile that is guaranteed valid for the fitted GLM ---
 baseline_row <- as.data.frame(lapply(names(X_ref), function(v) {
   col <- X_ref[[v]]
 
-  # Factor predictors: choose a valid level from model_xlev
   if (v %in% names(model_xlev)) {
     allowed <- model_xlev[[v]]
     obs_mode <- mode_level(as.character(col))
@@ -2769,7 +2510,6 @@ baseline_row <- as.data.frame(lapply(names(X_ref), function(v) {
     return(factor(obs_mode, levels = allowed))
   }
 
-  # Numeric / integer predictors
   if (is.integer(col)) {
     return(as.integer(round(stats::median(col, na.rm = TRUE))))
   }
@@ -2778,32 +2518,27 @@ baseline_row <- as.data.frame(lapply(names(X_ref), function(v) {
     return(as.numeric(stats::median(col, na.rm = TRUE)))
   }
 
-  # Character fallback
   mode_level(as.character(col))
 }), stringsAsFactors = FALSE)
 
 names(baseline_row) <- names(X_ref)
 
-# Restore integer type where appropriate
 for (v in names(X_ref)) {
   if (is.integer(X_ref[[v]]) && !(v %in% names(model_xlev))) {
     baseline_row[[v]] <- as.integer(round(as.numeric(baseline_row[[v]])))
   }
 }
 
-# Baseline predicted probability
 p0 <- safe_predict_prob(glm_fit_final, baseline_row)
 
 cat("Baseline predicted probability of Severe/Fatal crash:\n")
 print(round(p0, 4))
 
-# --- Main what-if function ---
 what_if <- function(var_name, values = NULL,
                     model = glm_fit_final, base = baseline_row, ref = X_ref, xlev = model_xlev) {
 
   if (!var_name %in% names(base)) stop("Variable not in model predictors: ", var_name)
 
-  # Factor predictor: only use levels the GLM actually knows
   if (var_name %in% names(xlev)) {
     allowed <- xlev[[var_name]]
 
@@ -2837,7 +2572,6 @@ what_if <- function(var_name, values = NULL,
     return(out)
   }
 
-  # Numeric / integer predictor
   xref <- ref[[var_name]]
 
   if (is.null(values)) {
@@ -2873,7 +2607,6 @@ what_if <- function(var_name, values = NULL,
     dplyr::arrange(dplyr::desc(p_severe))
 }
 
-# --- Example what-if tables using variables that are actually in the CURRENT GLM ---
 whatif_results <- list()
 
 if ("day_group" %in% names(baseline_row)) {
@@ -2956,7 +2689,6 @@ if ("TYPE_OF_COLLISION" %in% names(baseline_row)) {
   whatif_results$TYPE_OF_COLLISION <- what_if("TYPE_OF_COLLISION", vals)
 }
 
-# Print all result tables
 cat("\n================ WHAT-IF RESULTS (GLM) ================\n")
 for (nm in names(whatif_results)) {
   cat("\n------------------------------------------------------\n")
@@ -2968,22 +2700,16 @@ for (nm in names(whatif_results)) {
 
 # Penalized logistic regression: GLMNET model
 ```{r glmnet_model, message=FALSE, warning=FALSE}
-# What: Fit the LASSO GLMNET model using the shared train/test split.
-# Why: Keeps model naming clear and ensures alignment with the baseline split.
-
 lasso_glmnet_name <- "LASSO GLMNET"
 
-# Install/load glmnet if needed
 if (!requireNamespace("glmnet", quietly = TRUE)) install.packages("glmnet")
 library(glmnet)
 
-# ---- 1) Sanity checks ----
 if (!exists("train_set") || !exists("test_set")) {
   stop("train_set/test_set not found. Run the Baseline GLM chunk first.")
 }
 if (!("SevereBinary" %in% names(train_set))) stop("SevereBinary not found in train_set.")
 
-# ---- 2) Build aligned model matrices (one-hot encode factors consistently) ----
 train_set$.split <- "train"
 test_set$.split  <- "test"
 combo <- dplyr::bind_rows(train_set, test_set)
@@ -3005,7 +2731,6 @@ train_set$.split <- NULL
 test_set$.split  <- NULL
 combo$.split     <- NULL
 
-# ---- 3) Cross-validated glmnet ----
 set.seed(544)
 lasso_glmnet_cv_fit <- cv.glmnet(
   x = x_train,
@@ -3023,7 +2748,6 @@ cat(lasso_glmnet_name, "1-SE lambda:", lasso_glmnet_cv_fit$lambda.1se, "\n")
 
 plot(lasso_glmnet_cv_fit)
 
-# ---- 4) Predict on test + AUC ----
 lasso_glmnet_test_phat <- as.numeric(
   predict(lasso_glmnet_cv_fit, newx = x_test, s = "lambda.1se", type = "response")
 )
@@ -3037,17 +2761,15 @@ if (requireNamespace("pROC", quietly = TRUE)) {
   cat(lasso_glmnet_name, "TEST AUC:", round(auc_glmnet, 4), "\n")
 }
 
-# Confusion matrices at 0.50 and prevalence cutoff
 pred_05 <- ifelse(lasso_glmnet_test_phat >= 0.5, 1, 0)
 cat("\n", lasso_glmnet_name, "confusion matrix (cutoff=0.50):\n", sep = "")
 print(table(Pred = pred_05, Truth = y_test))
 
 prev <- mean(y_train == 1)
 pred_prev <- ifelse(lasso_glmnet_test_phat >= prev, 1, 0)
-cat("\n", lasso_glmnet_name, "confusion matrix (cutoff=prevalence=", round(prev, 4), "):\n", sep = "")
+cat("\n", lasso_glmnet_name, "confusion matrix (cutoff=prevalence=", round(prev, 4), "): \n", sep = "")
 print(table(Pred = pred_prev, Truth = y_test))
 
-# ---- 5) Top coefficients ----
 coef_mat <- as.matrix(coef(lasso_glmnet_cv_fit, s = "lambda.1se"))
 coef_df <- data.frame(
   term = rownames(coef_mat),
@@ -3063,12 +2785,8 @@ print(head(coef_df, 20))
 
 # Feature selection(glmnet LASSO)
 ```{r feature_selection_summary}
-# What: Extract selected predictors from glmnet (non-zero coefficients at lambda.1se).
-# Why: Makes “feature selection” explicit + reportable (which variables survived selection).
-
 if (!exists("cv_fit")) stop("cv_fit not found. Run glmnet_model chunk first.")
 
-# Non-zero coefficients at lambda.1se
 coef_mat <- as.matrix(coef(cv_fit, s = "lambda.1se"))
 coef_df <- data.frame(
   term = rownames(coef_mat),
@@ -3082,15 +2800,13 @@ cat("Number of selected (non-zero) one-hot terms:", nrow(coef_df), "\n\n")
 cat("Top 30 selected terms by |coef|:\n")
 print(head(coef_df, 30))
 
-# Map one-hot terms back to their base variable names (best-effort)
-# e.g., WEATHER_1C -> WEATHER_1, time_bucketPM... -> time_bucket
-candidate_base_vars <- setdiff(names(train_set), c("SevereBinary"))  # includes *_miss too
+candidate_base_vars <- setdiff(names(train_set), c("SevereBinary"))
 candidate_base_vars <- candidate_base_vars[order(nchar(candidate_base_vars), decreasing = TRUE)]
 
 base_var_from_term <- function(term, vars) {
   hits <- vars[startsWith(term, vars)]
   if (length(hits) == 0) return(term)
-  hits[1]  # vars sorted longest-first, so first hit is best match
+  hits[1]
 }
 
 coef_df$base_var <- vapply(coef_df$term, base_var_from_term, character(1), vars = candidate_base_vars)
@@ -3104,9 +2820,6 @@ print(selected_vars)
 
 # GLM what-if analysis for LASSO-selected features
 ```{r}
-# What: Summarize one-at-a-time probability changes for the most important LASSO-selected base variables.
-# Why: Reuses the earlier GLM what_if() helper instead of redefining the entire what-if pipeline.
-
 if (!exists("what_if")) stop("what_if() not found. Run the earlier 'What-if / one-at-a-time probability changes (GLM)' chunk first.")
 if (!exists("baseline_row")) stop("baseline_row not found. Run the earlier GLM what-if chunk first.")
 if (!exists("selected_vars")) stop("selected_vars not found. Run feature_selection_summary first.")
@@ -3124,7 +2837,7 @@ important_vars <- important_vars[!grepl("_miss$", important_vars)]
 important_vars <- important_vars[important_vars %in% names(baseline_row)]
 important_vars <- head(important_vars, top_k)
 
-cat("Most important variables (top ", top_k, "):\n", sep = "")
+cat("Most important variables (top ", top_k, "): \n", sep = "")
 print(important_vars)
 
 pick_levels <- function(var_name, ref, xlev, base_row, max_show = 8) {
@@ -3176,9 +2889,6 @@ print(whatif_summary)
 
 # report assumption checks
 ```{r, message=FALSE, warning=FALSE}
-# What: Run quick assumption checks for the report's hypothesis tests.
-# Why: The rubric asks for assumption checks, but not a full diagnostics section.
-
 raw_df_for_report <- if (exists("switrs")) switrs else switrs_reduced
 
 sample_for_shapiro <- function(x, max_n = 5000) {
@@ -3272,18 +2982,12 @@ cat("- For numeric predictors, Welch t-tests are paired with Wilcoxon tests for 
 
 # UNIVARIATE HYPOTHESIS TESTING HELPERS (t-test / Wilcoxon / prop-test / chi-square)
 ```{r}
-# What: Provide a single standardized pipeline to test association between each predictor and SevereBinary.
-# Why: Matches STAT 544 “statistics report” expectations: t-tests for numeric vars, two-proportion tests for
-#      binary predictors, and chi-square independence tests for categorical predictors.
-
 library(dplyr)
 library(purrr)
 library(broom)
 library(tibble)
 
-# --- Effect sizes ---
 cohen_d <- function(x, g) {
-  # x numeric; g factor with levels c("Other","Severe/Fatal")
   x0 <- x[g == "Other"]; x1 <- x[g == "Severe/Fatal"]
   x0 <- x0[is.finite(x0)]; x1 <- x1[is.finite(x1)]
   if (length(x0) < 2 || length(x1) < 2) return(NA_real_)
@@ -3300,7 +3004,6 @@ cramers_v <- function(tab, chi2_stat) {
   sqrt(as.numeric(chi2_stat) / (n * min(r-1, c-1)))
 }
 
-# --- Main per-variable test ---
 run_univariate_test <- function(data, var,
                                 outcome = "SevereBinary",
                                 alpha = 0.05,
@@ -3312,21 +3015,16 @@ run_univariate_test <- function(data, var,
     dplyr::select(all_of(c(var, outcome))) %>%
     dplyr::filter(!is.na(.data[[outcome]]))
 
-  # Ensure outcome levels
   df[[outcome]] <- factor(df[[outcome]], levels = c("Other", "Severe/Fatal"))
   df <- df %>% dplyr::filter(!is.na(.data[[outcome]]))
 
   x <- df[[var]]
 
-  # Treat numeric 0/1 (or 2 unique values) as categorical
   if (is.numeric(x) || is.integer(x)) {
     ux <- unique(x[is.finite(x)])
     if (length(ux) <= 2) x <- as.factor(x)
   }
 
-  # -------------------------
-  # NUMERIC predictor: t-test + Wilcoxon
-  # -------------------------
   if (is.numeric(x) || is.integer(x)) {
     df2 <- df %>% mutate(x = as.numeric(.data[[var]])) %>% filter(is.finite(x))
     if (nrow(df2) < 10) return(tibble(
@@ -3336,14 +3034,9 @@ run_univariate_test <- function(data, var,
     ))
 
     df2$g <- df2[[outcome]]
-    
-    # Welch t-test (default; robust)
+
     tt_welch <- tryCatch(t.test(x ~ g, data = df2, var.equal = FALSE), error = function(e) NULL)
-    
-    # Student t-test (equal variance) explicitly shown for the requirement
     tt_student <- tryCatch(t.test(x ~ g, data = df2, var.equal = TRUE), error = function(e) NULL)
-    
-    # Wilcoxon as nonparametric backup for skew / non-normal settings (notes include Wilcoxon) 
     wt <- tryCatch(wilcox.test(x ~ g, data = df2, exact = FALSE), error = function(e) NULL)
 
     m_other <- mean(df2$x[df2[[outcome]] == "Other"], na.rm = TRUE)
@@ -3354,15 +3047,11 @@ run_univariate_test <- function(data, var,
       variable = var,
       type = "numeric",
       n_used = nrow(df2),
-
-      # Report BOTH (prof wants t-tests). Use Welch p as primary unless we want to force Student.
       test = "t-test (Welch) + t-test (Student) + Wilcoxon",
       statistic = if (!is.null(tt_welch)) unname(tt_welch$statistic) else NA_real_,
       p_value = if (!is.null(tt_welch)) tt_welch$p.value else NA_real_,
-
       p_value_student = if (!is.null(tt_student)) tt_student$p.value else NA_real_,
       p_value_wilcox  = if (!is.null(wt)) wt$p.value else NA_real_,
-
       mean_other = m_other,
       mean_severe = m_sev,
       mean_diff = m_sev - m_other,
@@ -3371,9 +3060,6 @@ run_univariate_test <- function(data, var,
     )
   }
 
-  # -------------------------
-  # CATEGORICAL predictor: prop-test for 2 levels, chi-square for 2+ levels
-  # -------------------------
   x <- as.character(x)
   x[x == ""] <- NA_character_
   df2 <- df %>% mutate(x = x) %>% filter(!is.na(x))
@@ -3384,7 +3070,6 @@ run_univariate_test <- function(data, var,
     p_value = NA_real_, effect = NA_real_, effect_label = NA_character_
   ))
 
-  # Trim extreme high-cardinality (keeps runtime sane; still “as many as we can”)
   k <- length(unique(df2$x))
   if (k > max_levels) {
     return(tibble(
@@ -3396,7 +3081,6 @@ run_univariate_test <- function(data, var,
 
   tab <- table(df2$x, df2[[outcome]])
 
-  # If exactly 2 levels -> Two-proportion test (matches notes)
   if (nrow(tab) == 2) {
     x_succ <- tab[, "Severe/Fatal"]
     n_tot  <- rowSums(tab)
@@ -3405,8 +3089,6 @@ run_univariate_test <- function(data, var,
     p1 <- x_succ[1] / n_tot[1]
     p2 <- x_succ[2] / n_tot[2]
     diff <- p1 - p2
-
-    # For effect size: risk difference (p1-p2) and also Cramer's V for 2x2
     v <- cramers_v(tab, pt$statistic)
 
     tibble(
@@ -3425,7 +3107,6 @@ run_univariate_test <- function(data, var,
       effect_label = "CramersV (2x2)"
     )
   } else {
-    # 2+ levels -> Chi-square independence test
     cs <- suppressWarnings(chisq.test(tab))
     use_sim <- any(cs$expected < 5)
     cs2 <- if (use_sim) suppressWarnings(chisq.test(tab, simulate.p.value = TRUE, B = chisq_B)) else cs
@@ -3456,24 +3137,17 @@ run_univariate_suite <- function(data, vars, outcome = "SevereBinary") {
 
 # UNIVARIATE TEST BATTERY: Selected features + (optional) all candidate predictors
 ```{r}
-# What: Run hypothesis tests for the LASSO-selected base variables, then optionally for all candidate predictors.
-# Why: Professor wants hypothesis tests for as many variables as possible + explicit t-tests where applicable.
-
 if (!exists("switrs_reduced")) stop("switrs_reduced not found. Run our cleaning/feature engineering first.")
 if (!("SevereBinary" %in% names(switrs_reduced))) stop("SevereBinary not found in switrs_reduced.")
 
-# --- A) Tests on SELECTED FEATURES (from our glmnet feature selection summary) ---
-# feature_selection_summary chunk created: selected_vars (with column base_var)
 if (exists("selected_vars") && "base_var" %in% names(selected_vars)) {
   selected_base_vars <- unique(selected_vars$base_var)
 } else if (exists("train_set")) {
-  # fallback: if selected_vars isn't available, at least test what’s in the model
   selected_base_vars <- setdiff(names(train_set), c("SevereBinary"))
 } else {
   stop("Neither selected_vars nor train_set exists. Run glmnet feature selection (or baseline model) first.")
 }
 
-# Remove anything outcome/leakage-ish just in case
 if (exists("leakage_vars")) selected_base_vars <- setdiff(selected_base_vars, leakage_vars)
 selected_base_vars <- intersect(selected_base_vars, names(switrs_reduced))
 
@@ -3484,8 +3158,6 @@ tests_selected <- run_univariate_suite(switrs_reduced, selected_base_vars, outco
 cat("\nTop 30 (FDR-adjusted) significant selected variables:\n")
 print(head(tests_selected, 30))
 
-# --- B) Optional: tests on ALL candidate predictors we considered ---
-# Uses our candidate_predictors object from baseline modeling chunk if present
 if (exists("candidate_predictors")) {
   all_vars <- candidate_predictors
   if (exists("leakage_vars")) all_vars <- setdiff(all_vars, leakage_vars)
@@ -3503,9 +3175,6 @@ if (exists("candidate_predictors")) {
 
 # Re-run tests after removing "Not Stated" categories (sensitivity check)
 ```{r}
-# What: Remove "Not Stated" as a level before hypothesis testing.
-# Why: Provides cleaner inference on real categories; include as sensitivity analysis.
-
 switrs_noNS <- switrs_reduced %>%
   dplyr::mutate(across(where(is.character), ~ dplyr::na_if(.x, "Not Stated"))) %>%
   dplyr::mutate(across(where(is.factor), ~ {
@@ -3514,7 +3183,6 @@ switrs_noNS <- switrs_reduced %>%
     factor(x)
   }))
 
-# Selected-vars rerun
 tests_selected_noNS <- run_univariate_suite(switrs_noNS, selected_base_vars, outcome = "SevereBinary")
 
 cat("\nTop 30 selected vars (NO Not Stated, FDR-adjusted):\n")
@@ -3523,9 +3191,6 @@ print(head(tests_selected_noNS, 30))
 
 # Print contingency tables for top categorical predictors (by FDR)
 ```{r}
-# What: Show the raw counts used by chi-square / prop tests.
-# Why: Makes the hypothesis testing deliverable more “textbook” and auditable.
-
 print_top_tables <- function(test_tbl, data, top_k = 8) {
   top_vars <- test_tbl %>%
     dplyr::filter(grepl("^categorical", type)) %>%
@@ -3539,14 +3204,12 @@ print_top_tables <- function(test_tbl, data, top_k = 8) {
     cat("Contingency table for:", v, "\n")
     cat("=============================\n")
 
-    # KEEP EXACTLY the same table construction you already used:
     tab <- table(
       normalize_not_stated(data[[v]], blank_to_notstated = TRUE),
       data$SevereBinary,
       useNA = "no"
     )
 
-    # FIX ONLY THE LABELS (do NOT change counts/levels):
     if (exists("legend_maps") && v %in% names(legend_maps) && exists("lookup_meaning")) {
       rn <- rownames(tab)
       rownames(tab) <- lookup_meaning(rn, legend_maps[[v]])
@@ -3563,14 +3226,10 @@ if (exists("tests_selected") && nrow(tests_selected) > 0) {
 
 # TARGETED SCENARIO MODEL: interaction-focused policy model
 ```{r}
-# What: Fit the targeted scenario GLM using high-impact interaction variables + required parent effects.
-# Why: Reuses the shared split and makes the scenario model clearly identifiable.
-
 set.seed(544)
 
 targeted_scenario_glm_name <- "Targeted Scenario GLM"
 
-# ---- 1) Define predictors ----
 scenario_predictors <- intersect(
   c(
     "day_group",
@@ -3586,52 +3245,29 @@ scenario_predictors <- intersect(
     "highway_night",
     "night_dui"
   ),
-  names(switrs_reduced)
+  names(switrs_model_ready)
 )
 
 cat(targeted_scenario_glm_name, "predictors:\n")
 print(scenario_predictors)
 
-# ---- 2) Build modeling dataset ----
-scenario_df <- switrs_reduced %>%
-  dplyr::select(all_of(c("CASE_ID", "SevereBinary", scenario_predictors))) %>%
-  dplyr::filter(!is.na(SevereBinary)) %>%
-  dplyr::mutate(
-    SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
-  ) %>%
-  dplyr::mutate(across(where(is.character), as.factor)) %>%
-  dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
-
-# ---- 3) Full-data numeric imputation BEFORE split ----
-num_cols <- names(scenario_df)[sapply(scenario_df, is.numeric)]
-num_cols <- setdiff(num_cols, c("CASE_ID", "SevereBinary"))
-
-scenario_full_medians <- setNames(vector("list", length(num_cols)), num_cols)
-
-for (v in num_cols) {
-  miss_name <- paste0(v, "_miss")
-
-  scenario_df[[miss_name]] <- as.integer(is.na(scenario_df[[v]]))
-
-  med <- suppressWarnings(median(scenario_df[[v]], na.rm = TRUE))
-  if (is.na(med)) med <- 0
-
-  scenario_full_medians[[v]] <- med
-  scenario_df[[v]][is.na(scenario_df[[v]])] <- med
+if (!exists("train_data") || !exists("test_data")) {
+  stop("train_data/test_data not found. Run shared_imputation and shared_train_test_split first.")
+}
+if (!exists("expand_predictors_with_miss")) {
+  stop("expand_predictors_with_miss() not found. Run the shared_imputation chunk first.")
 }
 
-# ---- 4) Reuse the SAME split as the shared split chunk ----
-if (!exists("train_case_ids") || !exists("test_case_ids")) {
-  stop("Shared split not found. Run the shared_train_test_split chunk first.")
-}
+scenario_predictors_final <- expand_predictors_with_miss(train_data, scenario_predictors)
 
-train_scen_raw <- scenario_df %>%
-  dplyr::filter(CASE_ID %in% train_case_ids)
+train_scen_raw <- train_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", scenario_predictors_final)))
 
-test_scen_raw <- scenario_df %>%
-  dplyr::filter(CASE_ID %in% test_case_ids)
+test_scen_raw <- test_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", scenario_predictors_final)))
 
-# ---- 5) Drop train-constant predictors ----
+cat(targeted_scenario_glm_name, "raw split sizes: Train =", nrow(train_scen_raw), "| Test =", nrow(test_scen_raw), "\n")
+
 is_constant_scen <- sapply(train_scen_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
   ux <- unique(x)
   ux <- ux[!is.na(ux)]
@@ -3647,7 +3283,6 @@ if (any(is_constant_scen)) {
   test_scen_raw  <- test_scen_raw  %>% dplyr::select(all_of(keep_cols_scen))
 }
 
-# ---- 6) Drop practical separators using TRAIN only ----
 if (!exists("is_perfect_separator")) {
   is_perfect_separator <- function(x, y, min_level_n = 30) {
     if (is.character(x) || is.factor(x)) {
@@ -3702,7 +3337,6 @@ cat("\nFinal", targeted_scenario_glm_name, "columns:\n")
 print(names(train_scen))
 cat(targeted_scenario_glm_name, "final split sizes: Train =", nrow(train_scen), "| Test =", nrow(test_scen), "\n")
 
-# ---- 7) Fit GLM ----
 targeted_scenario_glm_fit <- glm(
   SevereBinary ~ .,
   data = train_scen,
@@ -3714,7 +3348,6 @@ glm_scenario <- targeted_scenario_glm_fit
 
 cat(targeted_scenario_glm_name, "converged? ", targeted_scenario_glm_fit$converged, "\n", sep = "")
 
-# ---- 8) Evaluate ----
 targeted_scenario_test_phat <- predict(targeted_scenario_glm_fit, newdata = test_scen, type = "response")
 test_phat_scen <- targeted_scenario_test_phat
 test_y_scen <- test_scen$SevereBinary
@@ -3733,7 +3366,6 @@ pred_prev_scen <- factor(ifelse(targeted_scenario_test_phat >= prev_scen, "Sever
 cat("\n", targeted_scenario_glm_name, "confusion matrix (prevalence cutoff):\n", sep = "")
 print(table(Pred = pred_prev_scen, Truth = test_y_scen))
 
-# ---- 9) Odds ratios ----
 coefs <- summary(targeted_scenario_glm_fit)$coefficients
 
 or_tbl_scen <- data.frame(
@@ -3755,94 +3387,19 @@ cat("\nTop", targeted_scenario_glm_name, "odds ratios:\n")
 print(head(or_tbl_scen, 15))
 ```
 
-# Comparison and operating point metrics
-```{r model_compare, message=FALSE, warning=FALSE}
-# What: Compare the Baseline GLM and LASSO GLMNET on the same shared test set.
-# Why: Keeps model names explicit and easy to follow.
-
-baseline_glm_name <- "Baseline GLM"
-lasso_glmnet_name <- "LASSO GLMNET"
-
-metric_at_cutoff <- function(y01, p, cutoff) {
-  pred <- as.integer(p >= cutoff)
-  tp <- sum(pred == 1 & y01 == 1)
-  tn <- sum(pred == 0 & y01 == 0)
-  fp <- sum(pred == 1 & y01 == 0)
-  fn <- sum(pred == 0 & y01 == 1)
-
-  data.frame(
-    cutoff = cutoff,
-    sensitivity = ifelse(tp + fn > 0, tp / (tp + fn), NA_real_),
-    specificity = ifelse(tn + fp > 0, tn / (tn + fp), NA_real_),
-    precision  = ifelse(tp + fp > 0, tp / (tp + fp), NA_real_),
-    accuracy   = (tp + tn) / (tp + tn + fp + fn),
-    stringsAsFactors = FALSE
-  )
-}
-
-if (!exists("test_set")) stop("test_set not found (from Baseline GLM chunk).")
-if (!exists("test_phat")) stop("test_phat not found (from Baseline GLM chunk).")
-if (!exists("p_test")) stop("p_test not found (from LASSO GLMNET chunk).")
-if (!exists("y_test")) stop("y_test not found (from LASSO GLMNET chunk).")
-
-y_glm <- as.integer(test_set$SevereBinary == "Severe/Fatal")
-p_glm <- as.numeric(test_phat)
-
-y_en <- as.integer(y_test)
-p_en <- as.numeric(p_test)
-
-if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
-auc_glm <- NA_real_
-auc_en  <- NA_real_
-
-if (requireNamespace("pROC", quietly = TRUE)) {
-  auc_glm <- as.numeric(pROC::auc(pROC::roc(y_glm, p_glm, quiet = TRUE)))
-  auc_en  <- as.numeric(pROC::auc(pROC::roc(y_en,  p_en,  quiet = TRUE)))
-}
-
-prev <- mean(as.integer(train_set$SevereBinary == "Severe/Fatal"))
-
-glm_05   <- metric_at_cutoff(y_glm, p_glm, 0.5)
-glm_prev <- metric_at_cutoff(y_glm, p_glm, prev)
-
-en_05    <- metric_at_cutoff(y_en,  p_en,  0.5)
-en_prev  <- metric_at_cutoff(y_en,  p_en,  prev)
-
-glm_05$model   <- baseline_glm_name
-glm_prev$model <- baseline_glm_name
-en_05$model    <- lasso_glmnet_name
-en_prev$model  <- lasso_glmnet_name
-
-perf_tbl <- dplyr::bind_rows(glm_05, glm_prev, en_05, en_prev) %>%
-  dplyr::select(model, cutoff, sensitivity, specificity, precision, accuracy)
-
-auc_tbl <- data.frame(
-  model = c(baseline_glm_name, lasso_glmnet_name),
-  test_auc = c(auc_glm, auc_en)
-)
-
-cat("Test AUC comparison:\n")
-print(auc_tbl)
-
-cat("\nOperating point metrics (test set):\n")
-print(perf_tbl)
-```
-
 # Targeted subgroup extension model
 ```{r subgroup_extension_model, message=FALSE, warning=FALSE}
-# What: Fit the Baseline GLM + subgroup extension model using the shared split.
-# Why: Makes the subgroup model easy to distinguish from the other models.
-
 baseline_glm_name <- "Baseline GLM"
 subgroup_extension_glm_name <- "Baseline GLM + Subgroup Extension"
 
-if (!exists("switrs_reduced")) stop("switrs_reduced not found.")
+if (!exists("switrs_model_ready")) stop("switrs_model_ready not found.")
 if (!exists("candidate_predictors")) stop("candidate_predictors not found. Run the Baseline GLM chunk first.")
-if (!exists("train_case_ids") || !exists("test_case_ids")) stop("Shared split not found. Run the shared_train_test_split chunk first.")
+if (!exists("train_data") || !exists("test_data")) stop("train_data/test_data not found. Run shared_imputation and shared_train_test_split first.")
+if (!exists("expand_predictors_with_miss")) stop("expand_predictors_with_miss() not found. Run the shared_imputation chunk first.")
 if (!exists("is_perfect_separator")) stop("is_perfect_separator() not found. Run the Baseline GLM chunk first.")
 
-subgroup_addons <- intersect(c("intersection_ped", "highway_night"), names(switrs_reduced))
-if (length(subgroup_addons) == 0) stop("Neither intersection_ped nor highway_night is available in switrs_reduced.")
+subgroup_addons <- intersect(c("intersection_ped", "highway_night"), names(switrs_model_ready))
+if (length(subgroup_addons) == 0) stop("Neither intersection_ped nor highway_night is available in switrs_model_ready.")
 
 candidate_predictors_subgroup <- unique(c(candidate_predictors, subgroup_addons))
 candidate_predictors_subgroup <- setdiff(candidate_predictors_subgroup, leakage_vars)
@@ -3850,41 +3407,14 @@ candidate_predictors_subgroup <- setdiff(candidate_predictors_subgroup, leakage_
 cat(subgroup_extension_glm_name, "predictors added:\n")
 print(subgroup_addons)
 
-model_df_sub_raw <- switrs_reduced %>%
-  dplyr::select(all_of(c("CASE_ID", "SevereBinary", candidate_predictors_subgroup))) %>%
-  dplyr::filter(!is.na(SevereBinary)) %>%
-  dplyr::mutate(
-    SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal"))
-  ) %>%
-  dplyr::mutate(across(where(is.character), as.factor)) %>%
-  dplyr::mutate(across(where(is.factor), ~ forcats::fct_explicit_na(.x, na_level = "Not Stated")))
+subgroup_predictors_final <- expand_predictors_with_miss(train_data, candidate_predictors_subgroup)
 
-# ---- Full-data numeric imputation BEFORE split ----
-num_cols_sub <- names(model_df_sub_raw)[sapply(model_df_sub_raw, is.numeric)]
-num_cols_sub <- setdiff(num_cols_sub, c("CASE_ID", "SevereBinary"))
+train_set_sub_raw <- train_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", subgroup_predictors_final)))
 
-subgroup_full_medians <- setNames(vector("list", length(num_cols_sub)), num_cols_sub)
+test_set_sub_raw <- test_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", subgroup_predictors_final)))
 
-for (v in num_cols_sub) {
-  miss_name <- paste0(v, "_miss")
-
-  model_df_sub_raw[[miss_name]] <- as.integer(is.na(model_df_sub_raw[[v]]))
-
-  med <- suppressWarnings(median(model_df_sub_raw[[v]], na.rm = TRUE))
-  if (is.na(med)) med <- 0
-
-  subgroup_full_medians[[v]] <- med
-  model_df_sub_raw[[v]][is.na(model_df_sub_raw[[v]])] <- med
-}
-
-# ---- Reuse shared split ----
-train_set_sub_raw <- model_df_sub_raw %>%
-  dplyr::filter(CASE_ID %in% train_case_ids)
-
-test_set_sub_raw <- model_df_sub_raw %>%
-  dplyr::filter(CASE_ID %in% test_case_ids)
-
-# ---- Drop train-constant predictors ----
 is_constant_sub <- sapply(train_set_sub_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
   ux <- unique(x)
   ux <- ux[!is.na(ux)]
@@ -3900,7 +3430,6 @@ if (any(is_constant_sub)) {
   test_set_sub_raw  <- test_set_sub_raw  %>% dplyr::select(all_of(keep_cols_sub))
 }
 
-# ---- Drop practical separators using TRAIN only ----
 y_train_sub <- train_set_sub_raw$SevereBinary
 pred_names_sub <- setdiff(names(train_set_sub_raw), c("CASE_ID", "SevereBinary"))
 
@@ -3944,14 +3473,18 @@ auc_baseline_now <- NA_real_
 
 if (requireNamespace("pROC", quietly = TRUE)) {
   auc_subgroup <- as.numeric(
-    pROC::auc(pROC::roc(test_y_subgroup, subgroup_extension_test_phat,
-                        levels = c("Other", "Severe/Fatal"), quiet = TRUE))
+    pROC::auc(
+      pROC::roc(test_y_subgroup, subgroup_extension_test_phat,
+                levels = c("Other", "Severe/Fatal"), quiet = TRUE)
+    )
   )
 
-  if (exists("test_y") && exists("test_phat")) {
+  if (exists("test_set") && exists("test_phat")) {
     auc_baseline_now <- as.numeric(
-      pROC::auc(pROC::roc(test_y, test_phat,
-                          levels = c("Other", "Severe/Fatal"), quiet = TRUE))
+      pROC::auc(
+        pROC::roc(test_set$SevereBinary, test_phat,
+                  levels = c("Other", "Severe/Fatal"), quiet = TRUE)
+      )
     )
   }
 }
@@ -4008,7 +3541,7 @@ print(table(
   Truth = test_y_subgroup
 ))
 
-cat("\n", subgroup_extension_glm_name, "confusion matrix (cutoff=prevalence=", round(prev_sub, 4), "):\n", sep = "")
+cat("\n", subgroup_extension_glm_name, "confusion matrix (cutoff=prevalence=", round(prev_sub, 4), "): \n", sep = "")
 print(table(
   Pred = factor(ifelse(subgroup_extension_test_phat >= prev_sub, "Severe/Fatal", "Other"),
                 levels = c("Other", "Severe/Fatal")),
@@ -4018,23 +3551,26 @@ print(table(
 
 # EXECUTIVE SUMMARY (Storyboard-ready text)
 ```{r exec_summary, results='asis'}
-# What: Print a concise narrative tying hotspots + scenarios + hypothesis tests + model performance.
-# Why: Gives paste-ready language for storyboard + final report in client-friendly terms.
-
 cat("## Executive summary\n\n")
 
 baseline_glm_name <- "Baseline GLM"
 lasso_glmnet_name <- "LASSO GLMNET"
 
-# ---- Key model performance ----
 auc_glm_val    <- NA_real_
 auc_glmnet_val <- NA_real_
-if (exists("auc_tbl") && all(c("model","test_auc") %in% names(auc_tbl))) {
-  auc_glm_val    <- auc_tbl$test_auc[auc_tbl$model == baseline_glm_name]
-  auc_glmnet_val <- auc_tbl$test_auc[auc_tbl$model == lasso_glmnet_name]
+
+if (exists("all_model_compare_tbl")) {
+  auc_glm_val <- all_model_compare_tbl %>%
+    dplyr::filter(model == baseline_glm_name) %>%
+    dplyr::slice(1) %>%
+    dplyr::pull(test_auc)
+
+  auc_glmnet_val <- all_model_compare_tbl %>%
+    dplyr::filter(model == lasso_glmnet_name) %>%
+    dplyr::slice(1) %>%
+    dplyr::pull(test_auc)
 }
 
-# ---- Weekend vs weekday quick difference (for narrative) ----
 weekend_diff_pp <- NA_real_
 if ("weekend" %in% names(switrs_reduced)) {
   tmp <- switrs_reduced %>%
@@ -4046,7 +3582,6 @@ if ("weekend" %in% names(switrs_reduced)) {
   }
 }
 
-# ---- Pull top hotspot + top scenario for concrete callouts ----
 top_hotspot <- NA_character_
 top_hotspot_n <- NA_integer_
 if (exists("hotspots_by_count") && nrow(hotspots_by_count) > 0) {
@@ -4061,7 +3596,6 @@ if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
   top_scenario_rate <- top_by_rate$severe_per_100[1]
 }
 
-# ---- Interaction quick callouts (Yes group rates) ----
 interaction_callouts <- NULL
 interaction_vars <- intersect(c("night_dui","rain_speed","ped_dark"), names(switrs_reduced))
 if (length(interaction_vars) > 0) {
@@ -4087,7 +3621,6 @@ if (length(interaction_vars) > 0) {
   interaction_callouts <- interaction_callouts[!is.na(interaction_callouts)]
 }
 
-# ---- Narrative ----
 cat(
   "We analyzed crash-level SWITRS records (one row per CASE_ID) to identify **where** and **under what conditions** severe/fatal crashes are most concentrated.\n\n"
 )
@@ -4134,12 +3667,8 @@ cat("- **Prioritize the highest-risk scenarios** (top severe/fatal rates) for ta
 cat("- **Use compound-risk conditions** (e.g., night×DUI, rain×speed proxies, pedestrian×dark) to design precision interventions.\n")
 ```
 
-# model diagnostics: class imabalance and missingness
+# model diagnostics: class imbalance and missingness
 ```{r}
-# What: Report class balance and remaining missingness in the modeling frame used for GLM baseline.
-# Why: Confirms the outcome imbalance and verifies preprocessing eliminated NA.
-
-# Use the finalized modeling frame from Chunk 7 if present; otherwise fall back
 md <- NULL
 if (exists("model_df_clean2")) md <- model_df_clean2
 if (is.null(md) && exists("model_df_clean")) md <- model_df_clean
@@ -4153,23 +3682,789 @@ remaining_na <- sort(colMeans(is.na(md)) * 100, decreasing = TRUE)
 print(head(remaining_na, 20))
 ```
 
-# next-step hooks (merged data expansion): “Note: PCF_VIOL_CATEGORY may cause separation in unpenalized GLM; glmnet handles it.”
+# next-step hooks (merged data expansion)
 ```{r}
-# What: List additional merged-only candidate predictors for future iterations (non-leakage).
-# Why: Keeps the roadmap aligned with modeling integrity (avoid injury/death proxies).
-
 pattern <- "PARTY_|DRIVER|VEH|SOBRIETY|DRUG|SAFETY|EQUIP|AT_FAULT|AGE|SEX|VIOL"
 
 cands <- names(switrs_reduced)[
   grepl(pattern, names(switrs_reduced), ignore.case = TRUE)
 ]
 
-# Drop known leakage / outcome-adjacent fields
 leak_like <- grepl("KILLED|FATAL|INJUR|SEVER|KSI|COUNT_", cands, ignore.case = TRUE)
 cands <- cands[!leak_like]
 
 cat("Candidate merged-only predictors to consider next (non-leakage):\n")
 print(head(cands, 50))
+```
+
+#################################### Start of Undersampling
+
+# Undersampling 1-1 split from training data
+```{r undersample_shared, message=FALSE, warning=FALSE}
+if (!exists("train_data") || !exists("test_data")) {
+  stop("train_data/test_data not found. Run shared_train_test_split first.")
+}
+
+if (!("SevereBinary" %in% names(train_data))) {
+  stop("SevereBinary not found in train_data.")
+}
+
+undersample_1to1 <- function(data, outcome = "SevereBinary", seed = 544) {
+  set.seed(seed)
+
+  df <- data %>%
+    dplyr::filter(!is.na(.data[[outcome]]))
+
+  class_counts <- table(df[[outcome]])
+  if (length(class_counts) != 2) {
+    stop("Outcome must have exactly 2 non-missing classes for 1:1 undersampling.")
+  }
+
+  target_n <- min(class_counts)
+
+  df_bal <- df %>%
+    dplyr::group_by(.data[[outcome]]) %>%
+    dplyr::slice_sample(n = target_n, replace = FALSE) %>%
+    dplyr::ungroup()
+
+  df_bal[[outcome]] <- factor(df_bal[[outcome]], levels = levels(data[[outcome]]))
+  df_bal
+}
+
+align_factor_levels_to_train <- function(train_df, test_df,
+                                         outcome = "SevereBinary",
+                                         id_col = "CASE_ID") {
+
+  common_cols <- intersect(names(train_df), names(test_df))
+  pred_cols <- setdiff(common_cols, c(outcome, id_col))
+
+  for (v in pred_cols) {
+    is_cat <- is.factor(train_df[[v]]) || is.character(train_df[[v]]) ||
+              is.factor(test_df[[v]])  || is.character(test_df[[v]])
+
+    if (!is_cat) next
+
+    train_chr <- as.character(train_df[[v]])
+    test_chr  <- as.character(test_df[[v]])
+
+    observed_train_levels <- unique(train_chr[!is.na(train_chr)])
+
+    if (length(observed_train_levels) == 0) next
+
+    fallback_level <- if ("Not Stated" %in% observed_train_levels) {
+      "Not Stated"
+    } else {
+      observed_train_levels[1]
+    }
+
+    unseen_in_test <- !is.na(test_chr) & !(test_chr %in% observed_train_levels)
+    if (any(unseen_in_test)) {
+      test_chr[unseen_in_test] <- fallback_level
+    }
+
+    train_df[[v]] <- factor(train_chr, levels = observed_train_levels)
+    test_df[[v]]  <- factor(test_chr,  levels = observed_train_levels)
+  }
+
+  list(train = train_df, test = test_df)
+}
+
+is_perfect_separator <- function(x, y, min_level_n = 30) {
+  if (is.character(x) || is.factor(x)) {
+    tab <- table(x, y, useNA = "no")
+    lvl_n <- rowSums(tab)
+    tab2 <- tab[lvl_n >= min_level_n, , drop = FALSE]
+    if (nrow(tab2) == 0) return(FALSE)
+    any(tab2[, "Other"] == 0 | tab2[, "Severe/Fatal"] == 0)
+  } else if (is.numeric(x) || is.integer(x)) {
+    ux <- sort(unique(x))
+    ux <- ux[!is.na(ux)]
+    if (length(ux) <= 1) return(FALSE)
+
+    qs <- unique(stats::quantile(x, probs = seq(0.1, 0.9, by = 0.1), na.rm = TRUE))
+    qs <- qs[!is.na(qs)]
+
+    for (cut in qs) {
+      left  <- y[x <= cut]
+      right <- y[x >  cut]
+
+      if (length(left) >= min_level_n && length(right) >= min_level_n) {
+        if (all(left == "Other") || all(left == "Severe/Fatal") ||
+            all(right == "Other") || all(right == "Severe/Fatal")) {
+          return(TRUE)
+        }
+      }
+    }
+    FALSE
+  } else {
+    FALSE
+  }
+}
+
+binary_metrics <- function(truth, prob, cutoff = 0.5, positive = "Severe/Fatal") {
+  truth_chr <- as.character(truth)
+  truth01 <- as.integer(truth_chr == positive)
+  pred01  <- as.integer(prob >= cutoff)
+
+  tp <- sum(pred01 == 1 & truth01 == 1, na.rm = TRUE)
+  tn <- sum(pred01 == 0 & truth01 == 0, na.rm = TRUE)
+  fp <- sum(pred01 == 1 & truth01 == 0, na.rm = TRUE)
+  fn <- sum(pred01 == 0 & truth01 == 1, na.rm = TRUE)
+
+  data.frame(
+    cutoff = cutoff,
+    sensitivity = ifelse(tp + fn > 0, tp / (tp + fn), NA_real_),
+    specificity = ifelse(tn + fp > 0, tn / (tn + fp), NA_real_),
+    precision   = ifelse(tp + fp > 0, tp / (tp + fp), NA_real_),
+    accuracy    = ifelse(tp + tn + fp + fn > 0, (tp + tn) / (tp + tn + fp + fn), NA_real_)
+  )
+}
+
+train_data_under <- undersample_1to1(train_data, outcome = "SevereBinary", seed = 544)
+
+cat("Original train class balance:\n")
+print(table(train_data$SevereBinary, useNA = "ifany"))
+
+cat("\nUndersampled train class balance (1:1):\n")
+print(table(train_data_under$SevereBinary, useNA = "ifany"))
+
+cat("\nTest class balance (unchanged):\n")
+print(table(test_data$SevereBinary, useNA = "ifany"))
+
+orig_prev <- mean(train_data$SevereBinary == "Severe/Fatal", na.rm = TRUE)
+cat("\nOriginal train Severe/Fatal prevalence =", round(orig_prev, 4), "\n")
+```
+
+# Baseline GLM with 1:1 undersampling
+```{r baseline_glm_undersampled, message=FALSE, warning=FALSE}
+set.seed(544)
+
+baseline_glm_us_name <- "Baseline GLM (Undersampled 1:1)"
+
+if (!exists("train_data_under") || !exists("test_data")) {
+  stop("Run the undersample_shared chunk first.")
+}
+if (!exists("expand_predictors_with_miss")) {
+  stop("expand_predictors_with_miss() not found. Run shared_imputation first.")
+}
+if (!exists("leakage_vars")) leakage_vars <- character(0)
+
+candidate_predictors_us <- intersect(
+  c(
+    "year",
+    "day_group",
+    "night",
+    "friday_night",
+    "weather_group",
+    "lighting_group",
+    "ROAD_SURFACE",
+    "INTERSECTION",
+    "STATE_HWY_IND",
+    "TYPE_OF_COLLISION",
+    "PRIMARY_COLL_FACTOR",
+    "school_bus_proxy",
+    "pcf_dui",
+    "pcf_speed",
+    "ALCOHOL_INVOLVED",
+    "HIT_AND_RUN",
+    "is_ped",
+    "BICYCLE_ACCIDENT",
+    "MOTORCYCLE_ACCIDENT",
+    "TRUCK_ACCIDENT",
+    "night_dui",
+    "rain_speed",
+    "ped_dark",
+    "n_parties",
+    "any_party_alcohol",
+    "any_party_drug",
+    "any_party_at_fault",
+    "mean_party_age"
+  ),
+  names(switrs_model_ready)
+)
+
+candidate_predictors_us <- setdiff(candidate_predictors_us, leakage_vars)
+
+forbidden_redundant <- c(
+  "DAY_OF_WEEK", "weekend", "time_bucket",
+  "WEATHER_1", "is_rain",
+  "LIGHTING", "is_dark",
+  "PCF_VIOL_CATEGORY",
+  "PEDESTRIAN_ACCIDENT"
+)
+
+if (length(intersect(candidate_predictors_us, forbidden_redundant)) > 0) {
+  stop("Redundant predictors detected in candidate_predictors_us.")
+}
+
+baseline_predictors_us_final <- expand_predictors_with_miss(train_data_under, candidate_predictors_us)
+
+train_set_us_raw <- train_data_under %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", baseline_predictors_us_final)))
+
+test_set_us_raw <- test_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", baseline_predictors_us_final)))
+
+aligned_us <- align_factor_levels_to_train(train_set_us_raw, test_set_us_raw)
+train_set_us_raw <- aligned_us$train
+test_set_us_raw  <- aligned_us$test
+
+is_constant_us <- sapply(train_set_us_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
+  length(ux) <= 1
+})
+
+if (any(is_constant_us)) {
+  cat("Dropping baseline undersampled train-constant predictors:\n")
+  print(names(is_constant_us)[is_constant_us])
+
+  keep_cols_us <- c("CASE_ID", "SevereBinary", names(is_constant_us)[!is_constant_us])
+  train_set_us_raw <- train_set_us_raw %>% dplyr::select(all_of(keep_cols_us))
+  test_set_us_raw  <- test_set_us_raw  %>% dplyr::select(all_of(keep_cols_us))
+}
+
+y_train_us <- train_set_us_raw$SevereBinary
+pred_names_us <- setdiff(names(train_set_us_raw), c("CASE_ID", "SevereBinary"))
+
+sep_flags_us <- sapply(pred_names_us, function(v) {
+  is_perfect_separator(train_set_us_raw[[v]], y_train_us)
+})
+
+bad_vars_us <- names(sep_flags_us)[sep_flags_us]
+
+cat("Baseline undersampled predictors dropped for practical separation:", length(bad_vars_us), "\n")
+if (length(bad_vars_us) > 0) print(bad_vars_us)
+
+if (length(bad_vars_us) > 0) {
+  train_set_us_raw <- train_set_us_raw %>% dplyr::select(-dplyr::all_of(bad_vars_us))
+  test_set_us_raw  <- test_set_us_raw  %>% dplyr::select(-dplyr::all_of(bad_vars_us))
+}
+
+train_set_us <- train_set_us_raw %>% dplyr::select(-CASE_ID)
+test_set_us  <- test_set_us_raw  %>% dplyr::select(-CASE_ID)
+
+baseline_glm_us_fit <- glm(
+  SevereBinary ~ .,
+  data = train_set_us,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+baseline_glm_us_test_phat <- as.numeric(
+  predict(baseline_glm_us_fit, newdata = test_set_us, type = "response")
+)
+
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+
+baseline_glm_us_auc <- NA_real_
+if (requireNamespace("pROC", quietly = TRUE)) {
+  baseline_glm_us_roc <- pROC::roc(
+    test_set_us$SevereBinary,
+    baseline_glm_us_test_phat,
+    levels = c("Other", "Severe/Fatal"),
+    quiet = TRUE
+  )
+  baseline_glm_us_auc <- as.numeric(pROC::auc(baseline_glm_us_roc))
+}
+
+baseline_glm_us_metrics_05 <- binary_metrics(test_set_us$SevereBinary, baseline_glm_us_test_phat, cutoff = 0.50)
+
+cat("\n", baseline_glm_us_name, "converged? ", baseline_glm_us_fit$converged, "\n", sep = "")
+cat(baseline_glm_us_name, "TEST AUC:", round(baseline_glm_us_auc, 4), "\n")
+
+cat("\nMetrics at cutoff = 0.50\n")
+print(baseline_glm_us_metrics_05)
+
+cat("\nConfusion matrix (cutoff = 0.50):\n")
+print(table(
+  Pred = factor(ifelse(baseline_glm_us_test_phat >= 0.5, "Severe/Fatal", "Other"),
+                levels = c("Other", "Severe/Fatal")),
+  Truth = test_set_us$SevereBinary
+))
+```
+
+# LASSO GLMNET with 1:1 undersampling
+```{r glmnet_model_undersampled, message=FALSE, warning=FALSE}
+lasso_glmnet_us_name <- "LASSO GLMNET (Undersampled 1:1)"
+
+if (!exists("train_set_us") || !exists("test_set_us")) {
+  stop("Run baseline_glm_undersampled first.")
+}
+
+if (!requireNamespace("glmnet", quietly = TRUE)) install.packages("glmnet")
+library(glmnet)
+
+train_set_us$.split <- "train"
+test_set_us$.split  <- "test"
+
+combo_us <- dplyr::bind_rows(train_set_us, test_set_us)
+train_idx_us <- combo_us$.split == "train"
+test_idx_us  <- combo_us$.split == "test"
+
+combo_mm_us <- combo_us %>% dplyr::select(-.split)
+
+X_all_us <- model.matrix(SevereBinary ~ ., data = combo_mm_us)[, -1, drop = FALSE]
+
+x_train_us <- X_all_us[train_idx_us, , drop = FALSE]
+x_test_us  <- X_all_us[test_idx_us,  , drop = FALSE]
+
+y_train_us_glmnet <- as.integer(combo_us$SevereBinary[train_idx_us] == "Severe/Fatal")
+y_test_us_glmnet  <- as.integer(combo_us$SevereBinary[test_idx_us]  == "Severe/Fatal")
+
+train_set_us$.split <- NULL
+test_set_us$.split  <- NULL
+
+set.seed(544)
+lasso_glmnet_us_cv_fit <- cv.glmnet(
+  x = x_train_us,
+  y = y_train_us_glmnet,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 5,
+  type.measure = "auc"
+)
+
+lasso_glmnet_us_test_phat <- as.numeric(
+  predict(lasso_glmnet_us_cv_fit, newx = x_test_us, s = "lambda.1se", type = "response")
+)
+
+lasso_glmnet_us_auc <- NA_real_
+if (requireNamespace("pROC", quietly = TRUE)) {
+  roc_obj_us <- pROC::roc(response = y_test_us_glmnet, predictor = lasso_glmnet_us_test_phat, quiet = TRUE)
+  lasso_glmnet_us_auc <- as.numeric(pROC::auc(roc_obj_us))
+}
+
+lasso_glmnet_us_metrics_05 <- binary_metrics(test_set_us$SevereBinary, lasso_glmnet_us_test_phat, cutoff = 0.50)
+
+cat(lasso_glmnet_us_name, "best lambda (min):", lasso_glmnet_us_cv_fit$lambda.min, "\n")
+cat(lasso_glmnet_us_name, "1-SE lambda:", lasso_glmnet_us_cv_fit$lambda.1se, "\n")
+cat(lasso_glmnet_us_name, "TEST AUC:", round(lasso_glmnet_us_auc, 4), "\n")
+
+cat("\nMetrics at cutoff = 0.50\n")
+print(lasso_glmnet_us_metrics_05)
+
+cat("\nConfusion matrix (cutoff = 0.50):\n")
+print(table(
+  Pred = ifelse(lasso_glmnet_us_test_phat >= 0.5, 1, 0),
+  Truth = y_test_us_glmnet
+))
+
+coef_mat_us <- as.matrix(coef(lasso_glmnet_us_cv_fit, s = "lambda.1se"))
+coef_df_us <- data.frame(
+  term = rownames(coef_mat_us),
+  coef = as.numeric(coef_mat_us[, 1]),
+  row.names = NULL
+) %>%
+  dplyr::filter(term != "(Intercept)", coef != 0) %>%
+  dplyr::arrange(dplyr::desc(abs(coef)))
+
+cat("\nTop 20 non-zero coefficients by |coef| (undersampled glmnet):\n")
+print(head(coef_df_us, 20))
+```
+
+# Targeted Scenario GLM with 1:1 undersampling
+```{r targeted_scenario_glm_undersampled, message=FALSE, warning=FALSE}
+set.seed(544)
+
+targeted_scenario_glm_us_name <- "Targeted Scenario GLM (Undersampled 1:1)"
+
+scenario_predictors_us <- intersect(
+  c(
+    "day_group",
+    "night",
+    "is_ped",
+    "INTERSECTION",
+    "STATE_HWY_IND",
+    "lighting_group",
+    "pcf_dui",
+    "friday_night",
+    "ped_dark",
+    "intersection_ped",
+    "highway_night",
+    "night_dui"
+  ),
+  names(switrs_model_ready)
+)
+
+scenario_predictors_us_final <- expand_predictors_with_miss(train_data_under, scenario_predictors_us)
+
+train_scen_us_raw <- train_data_under %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", scenario_predictors_us_final)))
+
+test_scen_us_raw <- test_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", scenario_predictors_us_final)))
+
+aligned_scen_us <- align_factor_levels_to_train(train_scen_us_raw, test_scen_us_raw)
+train_scen_us_raw <- aligned_scen_us$train
+test_scen_us_raw  <- aligned_scen_us$test
+
+is_constant_scen_us <- sapply(train_scen_us_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
+  length(ux) <= 1
+})
+
+if (any(is_constant_scen_us)) {
+  cat("Dropping targeted-scenario undersampled train-constant predictors:\n")
+  print(names(is_constant_scen_us)[is_constant_scen_us])
+
+  keep_cols_scen_us <- c("CASE_ID", "SevereBinary", names(is_constant_scen_us)[!is_constant_scen_us])
+  train_scen_us_raw <- train_scen_us_raw %>% dplyr::select(all_of(keep_cols_scen_us))
+  test_scen_us_raw  <- test_scen_us_raw  %>% dplyr::select(all_of(keep_cols_scen_us))
+}
+
+y_train_scen_us <- train_scen_us_raw$SevereBinary
+pred_names_scen_us <- setdiff(names(train_scen_us_raw), c("CASE_ID", "SevereBinary"))
+
+sep_flags_scen_us <- sapply(pred_names_scen_us, function(v) {
+  is_perfect_separator(train_scen_us_raw[[v]], y_train_scen_us)
+})
+
+bad_vars_scen_us <- names(sep_flags_scen_us)[sep_flags_scen_us]
+
+cat("Targeted scenario undersampled predictors dropped for practical separation:", length(bad_vars_scen_us), "\n")
+if (length(bad_vars_scen_us) > 0) print(bad_vars_scen_us)
+
+if (length(bad_vars_scen_us) > 0) {
+  train_scen_us_raw <- train_scen_us_raw %>% dplyr::select(-dplyr::all_of(bad_vars_scen_us))
+  test_scen_us_raw  <- test_scen_us_raw  %>% dplyr::select(-dplyr::all_of(bad_vars_scen_us))
+}
+
+train_scen_us <- train_scen_us_raw %>% dplyr::select(-CASE_ID)
+test_scen_us  <- test_scen_us_raw  %>% dplyr::select(-CASE_ID)
+
+targeted_scenario_glm_us_fit <- glm(
+  SevereBinary ~ .,
+  data = train_scen_us,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+targeted_scenario_glm_us_test_phat <- as.numeric(
+  predict(targeted_scenario_glm_us_fit, newdata = test_scen_us, type = "response")
+)
+
+targeted_scenario_glm_us_auc <- NA_real_
+if (requireNamespace("pROC", quietly = TRUE)) {
+  roc_obj_scen_us <- pROC::roc(
+    test_scen_us$SevereBinary,
+    targeted_scenario_glm_us_test_phat,
+    levels = c("Other", "Severe/Fatal"),
+    quiet = TRUE
+  )
+  targeted_scenario_glm_us_auc <- as.numeric(pROC::auc(roc_obj_scen_us))
+}
+
+targeted_scenario_glm_us_metrics_05 <- binary_metrics(test_scen_us$SevereBinary, targeted_scenario_glm_us_test_phat, cutoff = 0.50)
+
+cat("\n", targeted_scenario_glm_us_name, "converged? ", targeted_scenario_glm_us_fit$converged, "\n", sep = "")
+cat(targeted_scenario_glm_us_name, "TEST AUC:", round(targeted_scenario_glm_us_auc, 4), "\n")
+
+cat("\nMetrics at cutoff = 0.50\n")
+print(targeted_scenario_glm_us_metrics_05)
+
+cat("\nConfusion matrix (cutoff = 0.50):\n")
+print(table(
+  Pred = factor(ifelse(targeted_scenario_glm_us_test_phat >= 0.5, "Severe/Fatal", "Other"),
+                levels = c("Other", "Severe/Fatal")),
+  Truth = test_scen_us$SevereBinary
+))
+```
+
+# Baseline GLM + Subgroup Extension with 1:1 undersampling
+```{r subgroup_extension_glm_undersampled, message=FALSE, warning=FALSE}
+set.seed(544)
+
+subgroup_extension_glm_us_name <- "Baseline GLM + Subgroup Extension (Undersampled 1:1)"
+
+if (!exists("candidate_predictors_us")) {
+  stop("Run baseline_glm_undersampled first so candidate_predictors_us is defined.")
+}
+
+subgroup_addons_us <- intersect(c("intersection_ped", "highway_night"), names(switrs_model_ready))
+candidate_predictors_sub_us <- unique(c(candidate_predictors_us, subgroup_addons_us))
+candidate_predictors_sub_us <- setdiff(candidate_predictors_sub_us, leakage_vars)
+
+subgroup_predictors_us_final <- expand_predictors_with_miss(train_data_under, candidate_predictors_sub_us)
+
+train_sub_us_raw <- train_data_under %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", subgroup_predictors_us_final)))
+
+test_sub_us_raw <- test_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", subgroup_predictors_us_final)))
+
+aligned_sub_us <- align_factor_levels_to_train(train_sub_us_raw, test_sub_us_raw)
+train_sub_us_raw <- aligned_sub_us$train
+test_sub_us_raw  <- aligned_sub_us$test
+
+is_constant_sub_us <- sapply(train_sub_us_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
+  length(ux) <= 1
+})
+
+if (any(is_constant_sub_us)) {
+  cat("Dropping subgroup-extension undersampled train-constant predictors:\n")
+  print(names(is_constant_sub_us)[is_constant_sub_us])
+
+  keep_cols_sub_us <- c("CASE_ID", "SevereBinary", names(is_constant_sub_us)[!is_constant_sub_us])
+  train_sub_us_raw <- train_sub_us_raw %>% dplyr::select(all_of(keep_cols_sub_us))
+  test_sub_us_raw  <- test_sub_us_raw  %>% dplyr::select(all_of(keep_cols_sub_us))
+}
+
+y_train_sub_us <- train_sub_us_raw$SevereBinary
+pred_names_sub_us <- setdiff(names(train_sub_us_raw), c("CASE_ID", "SevereBinary"))
+
+sep_flags_sub_us <- sapply(pred_names_sub_us, function(v) {
+  is_perfect_separator(train_sub_us_raw[[v]], y_train_sub_us)
+})
+
+bad_vars_sub_us <- names(sep_flags_sub_us)[sep_flags_sub_us]
+
+cat("Subgroup-extension undersampled predictors dropped for practical separation:", length(bad_vars_sub_us), "\n")
+if (length(bad_vars_sub_us) > 0) print(bad_vars_sub_us)
+
+if (length(bad_vars_sub_us) > 0) {
+  train_sub_us_raw <- train_sub_us_raw %>% dplyr::select(-dplyr::all_of(bad_vars_sub_us))
+  test_sub_us_raw  <- test_sub_us_raw  %>% dplyr::select(-dplyr::all_of(bad_vars_sub_us))
+}
+
+train_sub_us <- train_sub_us_raw %>% dplyr::select(-CASE_ID)
+test_sub_us  <- test_sub_us_raw  %>% dplyr::select(-CASE_ID)
+
+subgroup_extension_glm_us_fit <- glm(
+  SevereBinary ~ .,
+  data = train_sub_us,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+subgroup_extension_glm_us_test_phat <- as.numeric(
+  predict(subgroup_extension_glm_us_fit, newdata = test_sub_us, type = "response")
+)
+
+subgroup_extension_glm_us_auc <- NA_real_
+if (requireNamespace("pROC", quietly = TRUE)) {
+  roc_obj_sub_us <- pROC::roc(
+    test_sub_us$SevereBinary,
+    subgroup_extension_glm_us_test_phat,
+    levels = c("Other", "Severe/Fatal"),
+    quiet = TRUE
+  )
+  subgroup_extension_glm_us_auc <- as.numeric(pROC::auc(roc_obj_sub_us))
+}
+
+subgroup_extension_glm_us_metrics_05 <- binary_metrics(test_sub_us$SevereBinary, subgroup_extension_glm_us_test_phat, cutoff = 0.50)
+
+cat("\n", subgroup_extension_glm_us_name, "converged? ", subgroup_extension_glm_us_fit$converged, "\n", sep = "")
+cat(subgroup_extension_glm_us_name, "TEST AUC:", round(subgroup_extension_glm_us_auc, 4), "\n")
+
+cat("\nMetrics at cutoff = 0.50\n")
+print(subgroup_extension_glm_us_metrics_05)
+
+cat("\nConfusion matrix (cutoff = 0.50):\n")
+print(table(
+  Pred = factor(ifelse(subgroup_extension_glm_us_test_phat >= 0.5, "Severe/Fatal", "Other"),
+                levels = c("Other", "Severe/Fatal")),
+  Truth = test_sub_us$SevereBinary
+))
+```
+
+# Model Comparison
+```{r all_model_compare_original_and_undersampled, message=FALSE, warning=FALSE}
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+
+metric_at_cutoff_unified <- function(truth, prob, cutoff, positive = "Severe/Fatal") {
+
+  truth_chr <- if (is.factor(truth) || is.character(truth)) {
+    as.character(truth)
+  } else {
+    as.character(as.integer(truth))
+  }
+
+  truth01 <- if (all(na.omit(unique(truth_chr)) %in% c("0", "1"))) {
+    as.integer(truth_chr)
+  } else {
+    as.integer(truth_chr == positive)
+  }
+
+  pred01 <- as.integer(prob >= cutoff)
+
+  tp <- sum(pred01 == 1 & truth01 == 1, na.rm = TRUE)
+  tn <- sum(pred01 == 0 & truth01 == 0, na.rm = TRUE)
+  fp <- sum(pred01 == 1 & truth01 == 0, na.rm = TRUE)
+  fn <- sum(pred01 == 0 & truth01 == 1, na.rm = TRUE)
+
+  data.frame(
+    cutoff = cutoff,
+    sensitivity = ifelse(tp + fn > 0, tp / (tp + fn), NA_real_),
+    specificity = ifelse(tn + fp > 0, tn / (tn + fp), NA_real_),
+    precision   = ifelse(tp + fp > 0, tp / (tp + fp), NA_real_),
+    accuracy    = ifelse(tp + tn + fp + fn > 0, (tp + tn) / (tp + tn + fp + fn), NA_real_),
+    stringsAsFactors = FALSE
+  )
+}
+
+auc_unified <- function(truth, prob, positive = "Severe/Fatal") {
+
+  truth_chr <- if (is.factor(truth) || is.character(truth)) {
+    as.character(truth)
+  } else {
+    as.character(as.integer(truth))
+  }
+
+  if (all(na.omit(unique(truth_chr)) %in% c("0", "1"))) {
+    truth01 <- as.integer(truth_chr)
+    return(as.numeric(pROC::auc(pROC::roc(response = truth01, predictor = prob, quiet = TRUE))))
+  }
+
+  truth_fac <- factor(truth_chr, levels = c("Other", positive))
+  as.numeric(pROC::auc(
+    pROC::roc(response = truth_fac, predictor = prob,
+              levels = c("Other", positive), quiet = TRUE)
+  ))
+}
+
+if (exists("train_data")) {
+  original_prev_cutoff <- mean(train_data$SevereBinary == "Severe/Fatal", na.rm = TRUE)
+} else if (exists("train_set")) {
+  original_prev_cutoff <- mean(train_set$SevereBinary == "Severe/Fatal", na.rm = TRUE)
+} else {
+  stop("Could not find original training data to compute the prevalence cutoff.")
+}
+
+threshold_label_05   <- "0.50"
+threshold_label_prev <- paste0("Cutoff = ", round(original_prev_cutoff, 4))
+
+cat("Original train prevalence cutoff =", round(original_prev_cutoff, 4), "\n")
+
+build_model_rows <- function(model_name, truth, prob,
+                             include_prevalence_row = TRUE,
+                             prevalence_cutoff = original_prev_cutoff,
+                             prevalence_label = threshold_label_prev,
+                             positive = "Severe/Fatal") {
+
+  if (length(truth) != length(prob)) {
+    stop("Length mismatch for model: ", model_name)
+  }
+
+  auc_val <- auc_unified(truth, prob, positive = positive)
+
+  row_05 <- metric_at_cutoff_unified(truth, prob, cutoff = 0.50, positive = positive)
+  row_05$model <- model_name
+  row_05$threshold <- threshold_label_05
+
+  out <- row_05
+
+  if (isTRUE(include_prevalence_row)) {
+    row_prev <- metric_at_cutoff_unified(truth, prob, cutoff = prevalence_cutoff, positive = positive)
+    row_prev$model <- model_name
+    row_prev$threshold <- prevalence_label
+    out <- dplyr::bind_rows(out, row_prev)
+  }
+
+  out %>%
+    dplyr::mutate(test_auc = auc_val) %>%
+    dplyr::select(model, test_auc, threshold, sensitivity, specificity, precision, accuracy)
+}
+
+all_model_rows <- list()
+
+if (exists("test_set") && exists("test_phat")) {
+  all_model_rows[["baseline_original"]] <- build_model_rows(
+    model_name = "Baseline GLM",
+    truth = test_set$SevereBinary,
+    prob  = as.numeric(test_phat),
+    include_prevalence_row = TRUE
+  )
+}
+
+if (exists("y_test") && exists("p_test")) {
+  all_model_rows[["lasso_original"]] <- build_model_rows(
+    model_name = "LASSO GLMNET",
+    truth = y_test,
+    prob  = as.numeric(p_test),
+    include_prevalence_row = TRUE
+  )
+}
+
+if (exists("test_y_scen") && exists("test_phat_scen")) {
+  all_model_rows[["scenario_original"]] <- build_model_rows(
+    model_name = "Targeted Scenario GLM",
+    truth = test_y_scen,
+    prob  = as.numeric(test_phat_scen),
+    include_prevalence_row = TRUE
+  )
+}
+
+if (exists("test_y_subgroup") && exists("test_phat_subgroup")) {
+  all_model_rows[["subgroup_original"]] <- build_model_rows(
+    model_name = "Baseline GLM + Subgroup Extension",
+    truth = test_y_subgroup,
+    prob  = as.numeric(test_phat_subgroup),
+    include_prevalence_row = TRUE
+  )
+}
+
+if (exists("test_set_us") && exists("baseline_glm_us_test_phat")) {
+  all_model_rows[["baseline_us"]] <- build_model_rows(
+    model_name = "Baseline GLM (Undersampled 1:1)",
+    truth = test_set_us$SevereBinary,
+    prob  = as.numeric(baseline_glm_us_test_phat),
+    include_prevalence_row = FALSE
+  )
+}
+
+if (exists("test_set_us") && exists("lasso_glmnet_us_test_phat")) {
+  all_model_rows[["lasso_us"]] <- build_model_rows(
+    model_name = "LASSO GLMNET (Undersampled 1:1)",
+    truth = test_set_us$SevereBinary,
+    prob  = as.numeric(lasso_glmnet_us_test_phat),
+    include_prevalence_row = FALSE
+  )
+}
+
+if (exists("test_scen_us") && exists("targeted_scenario_glm_us_test_phat")) {
+  all_model_rows[["scenario_us"]] <- build_model_rows(
+    model_name = "Targeted Scenario GLM (Undersampled 1:1)",
+    truth = test_scen_us$SevereBinary,
+    prob  = as.numeric(targeted_scenario_glm_us_test_phat),
+    include_prevalence_row = FALSE
+  )
+}
+
+if (exists("test_sub_us") && exists("subgroup_extension_glm_us_test_phat")) {
+  all_model_rows[["subgroup_us"]] <- build_model_rows(
+    model_name = "Baseline GLM + Subgroup Extension (Undersampled 1:1)",
+    truth = test_sub_us$SevereBinary,
+    prob  = as.numeric(subgroup_extension_glm_us_test_phat),
+    include_prevalence_row = FALSE
+  )
+}
+
+if (length(all_model_rows) == 0) {
+  stop("No model predictions found. Run at least one original or undersampled model chunk first.")
+}
+
+all_model_compare_tbl <- dplyr::bind_rows(all_model_rows) %>%
+  dplyr::mutate(
+    model_group = dplyr::case_when(
+      grepl("Undersampled 1:1", model) ~ "Undersampled 1:1",
+      TRUE ~ "Original"
+    )
+  ) %>%
+  dplyr::arrange(model_group, dplyr::desc(test_auc), threshold)
+
+cat("\nUnified model comparison table:\n")
+print(all_model_compare_tbl)
+
+auc_only_tbl <- all_model_compare_tbl %>%
+  dplyr::distinct(model, model_group, test_auc) %>%
+  dplyr::arrange(model_group, dplyr::desc(test_auc))
+
+cat("\nAUC-only ranking:\n")
+print(auc_only_tbl)
 ```
 
 AFTER A NEW MODEL:
