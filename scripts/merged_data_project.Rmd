@@ -4271,6 +4271,387 @@ print(table(
 ))
 ```
 
+# Random Forest: original split + undersampled split
+```{r random_forest_models, message=FALSE, warning=FALSE}
+if (!requireNamespace("ranger", quietly = TRUE)) install.packages("ranger")
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+
+library(ranger)
+
+rf_name    <- "Random Forest"
+rf_us_name <- "Random Forest (Undersampled 1:1)"
+
+if (!exists("train_data") || !exists("test_data")) {
+  stop("train_data/test_data not found. Run shared_train_test_split first.")
+}
+if (!exists("train_data_under")) {
+  stop("train_data_under not found. Run undersample_shared first.")
+}
+if (!exists("expand_predictors_with_miss")) {
+  stop("expand_predictors_with_miss() not found. Run shared_imputation first.")
+}
+if (!exists("align_factor_levels_to_train")) {
+  stop("align_factor_levels_to_train() not found. Run undersample_shared first.")
+}
+if (!exists("binary_metrics")) {
+  stop("binary_metrics() not found. Run undersample_shared first.")
+}
+if (!exists("candidate_predictors")) {
+  stop("candidate_predictors not found. Run the Baseline GLM chunk first.")
+}
+if (!exists("leakage_vars")) leakage_vars <- character(0)
+
+# Use same predictor set as baseline GLM for apples-to-apples comparison
+rf_predictors <- setdiff(candidate_predictors, leakage_vars)
+rf_predictors <- intersect(rf_predictors, names(switrs_model_ready))
+
+build_rf_frames <- function(train_df, test_df, predictors,
+                            outcome = "SevereBinary", id_col = "CASE_ID") {
+
+  preds_final <- expand_predictors_with_miss(train_df, predictors)
+
+  train_raw <- train_df %>%
+    dplyr::select(all_of(c(id_col, outcome, preds_final)))
+
+  test_raw <- test_df %>%
+    dplyr::select(all_of(c(id_col, outcome, preds_final)))
+
+  aligned <- align_factor_levels_to_train(train_raw, test_raw,
+                                          outcome = outcome, id_col = id_col)
+
+  train_raw <- aligned$train
+  test_raw  <- aligned$test
+
+  # Drop train-constant predictors
+  is_constant <- sapply(train_raw %>% dplyr::select(-all_of(c(id_col, outcome))), function(x) {
+    ux <- unique(x)
+    ux <- ux[!is.na(ux)]
+    length(ux) <= 1
+  })
+
+  if (any(is_constant)) {
+    keep_cols <- c(id_col, outcome, names(is_constant)[!is_constant])
+    train_raw <- train_raw %>% dplyr::select(all_of(keep_cols))
+    test_raw  <- test_raw  %>% dplyr::select(all_of(keep_cols))
+  }
+
+  train_out <- train_raw %>% dplyr::select(-all_of(id_col))
+  test_out  <- test_raw  %>% dplyr::select(-all_of(id_col))
+
+  train_out[[outcome]] <- factor(train_out[[outcome]], levels = c("Other", "Severe/Fatal"))
+  test_out[[outcome]]  <- factor(test_out[[outcome]],  levels = c("Other", "Severe/Fatal"))
+
+  list(train = train_out, test = test_out)
+}
+
+fit_rf_model <- function(train_df, test_df, model_name,
+                         outcome = "SevereBinary", seed = 544) {
+
+  p <- ncol(train_df) - 1
+  mtry_val <- max(1, floor(sqrt(p)))
+
+  rf_fit <- ranger::ranger(
+    formula = stats::as.formula(paste(outcome, "~ .")),
+    data = train_df,
+    probability = TRUE,
+    num.trees = 1000,
+    mtry = mtry_val,
+    min.node.size = 10,
+    importance = "permutation",
+    respect.unordered.factors = "order",
+    seed = seed
+  )
+
+  rf_prob <- predict(rf_fit, data = test_df)$predictions[, "Severe/Fatal"]
+
+  rf_auc <- as.numeric(
+    pROC::auc(
+      pROC::roc(
+        response = test_df[[outcome]],
+        predictor = rf_prob,
+        levels = c("Other", "Severe/Fatal"),
+        quiet = TRUE
+      )
+    )
+  )
+
+  rf_prev_cutoff <- mean(train_df[[outcome]] == "Severe/Fatal")
+
+  metrics_05 <- binary_metrics(test_df[[outcome]], rf_prob, cutoff = 0.50)
+  metrics_prev <- binary_metrics(test_df[[outcome]], rf_prob, cutoff = rf_prev_cutoff)
+
+  pred_05 <- factor(
+    ifelse(rf_prob >= 0.50, "Severe/Fatal", "Other"),
+    levels = c("Other", "Severe/Fatal")
+  )
+
+  pred_prev <- factor(
+    ifelse(rf_prob >= rf_prev_cutoff, "Severe/Fatal", "Other"),
+    levels = c("Other", "Severe/Fatal")
+  )
+
+  importance_tbl <- data.frame(
+    variable = names(rf_fit$variable.importance),
+    importance = as.numeric(rf_fit$variable.importance),
+    stringsAsFactors = FALSE
+  ) %>%
+    dplyr::arrange(dplyr::desc(importance))
+
+  cat("\n============================================================\n")
+  cat(model_name, "\n")
+  cat("============================================================\n")
+  cat("Test AUC:", round(rf_auc, 4), "\n")
+  cat("Prevalence cutoff from training data:", round(rf_prev_cutoff, 4), "\n")
+
+  cat("\nMetrics at cutoff = 0.50\n")
+  print(metrics_05)
+
+  cat("\nMetrics at cutoff = prevalence\n")
+  print(metrics_prev)
+
+  cat("\nConfusion matrix (cutoff = 0.50):\n")
+  print(table(Pred = pred_05, Truth = test_df[[outcome]]))
+
+  cat("\nConfusion matrix (cutoff = prevalence):\n")
+  print(table(Pred = pred_prev, Truth = test_df[[outcome]]))
+
+  cat("\nTop 20 variables by permutation importance:\n")
+  print(head(importance_tbl, 20))
+
+  list(
+    fit = rf_fit,
+    prob = rf_prob,
+    auc = rf_auc,
+    metrics_05 = metrics_05,
+    metrics_prev = metrics_prev,
+    importance_tbl = importance_tbl
+  )
+}
+
+# Original RF
+rf_frames <- build_rf_frames(
+  train_df = train_data,
+  test_df = test_data,
+  predictors = rf_predictors
+)
+
+rf_result <- fit_rf_model(
+  train_df = rf_frames$train,
+  test_df = rf_frames$test,
+  model_name = rf_name
+)
+
+rf_fit <- rf_result$fit
+rf_test_phat <- rf_result$prob
+rf_auc <- rf_result$auc
+rf_importance_tbl <- rf_result$importance_tbl
+
+# Undersampled RF
+rf_us_frames <- build_rf_frames(
+  train_df = train_data_under,
+  test_df = test_data,
+  predictors = rf_predictors
+)
+
+rf_us_result <- fit_rf_model(
+  train_df = rf_us_frames$train,
+  test_df = rf_us_frames$test,
+  model_name = rf_us_name
+)
+
+rf_us_fit <- rf_us_result$fit
+rf_us_test_phat <- rf_us_result$prob
+rf_us_auc <- rf_us_result$auc
+rf_us_importance_tbl <- rf_us_result$importance_tbl
+
+# Side-by-side summary
+rf_compare_tbl <- dplyr::bind_rows(
+  data.frame(
+    model = rf_name,
+    test_auc = rf_result$auc,
+    threshold = "0.50",
+    sensitivity = rf_result$metrics_05$sensitivity,
+    specificity = rf_result$metrics_05$specificity,
+    precision = rf_result$metrics_05$precision,
+    accuracy = rf_result$metrics_05$accuracy
+  ),
+  data.frame(
+    model = rf_name,
+    test_auc = rf_result$auc,
+    threshold = "Prevalence",
+    sensitivity = rf_result$metrics_prev$sensitivity,
+    specificity = rf_result$metrics_prev$specificity,
+    precision = rf_result$metrics_prev$precision,
+    accuracy = rf_result$metrics_prev$accuracy
+  ),
+  data.frame(
+    model = rf_us_name,
+    test_auc = rf_us_result$auc,
+    threshold = "0.50",
+    sensitivity = rf_us_result$metrics_05$sensitivity,
+    specificity = rf_us_result$metrics_05$specificity,
+    precision = rf_us_result$metrics_05$precision,
+    accuracy = rf_us_result$metrics_05$accuracy
+  ),
+  data.frame(
+    model = rf_us_name,
+    test_auc = rf_us_result$auc,
+    threshold = "Prevalence",
+    sensitivity = rf_us_result$metrics_prev$sensitivity,
+    specificity = rf_us_result$metrics_prev$specificity,
+    precision = rf_us_result$metrics_prev$precision,
+    accuracy = rf_us_result$metrics_prev$accuracy
+  )
+)
+
+cat("\n================ RANDOM FOREST COMPARISON ================\n")
+print(rf_compare_tbl)
+```
+
+# Class-weighted Random Forest on original training split
+```{r random_forest_class_weighted, message=FALSE, warning=FALSE}
+if (!requireNamespace("ranger", quietly = TRUE)) install.packages("ranger")
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+
+library(ranger)
+
+rf_wt_name <- "Random Forest (Class-Weighted)"
+
+if (!exists("train_data") || !exists("test_data")) {
+  stop("train_data/test_data not found. Run shared_train_test_split first.")
+}
+if (!exists("expand_predictors_with_miss")) {
+  stop("expand_predictors_with_miss() not found. Run shared_imputation first.")
+}
+if (!exists("align_factor_levels_to_train")) {
+  stop("align_factor_levels_to_train() not found. Run undersample_shared first.")
+}
+if (!exists("binary_metrics")) {
+  stop("binary_metrics() not found. Run undersample_shared first.")
+}
+if (!exists("candidate_predictors")) {
+  stop("candidate_predictors not found. Run the Baseline GLM chunk first.")
+}
+if (!exists("leakage_vars")) leakage_vars <- character(0)
+
+rf_predictors_wt <- setdiff(candidate_predictors, leakage_vars)
+rf_predictors_wt <- intersect(rf_predictors_wt, names(switrs_model_ready))
+
+rf_predictors_wt_final <- expand_predictors_with_miss(train_data, rf_predictors_wt)
+
+train_rf_wt_raw <- train_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", rf_predictors_wt_final)))
+
+test_rf_wt_raw <- test_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", rf_predictors_wt_final)))
+
+aligned_rf_wt <- align_factor_levels_to_train(train_rf_wt_raw, test_rf_wt_raw)
+train_rf_wt_raw <- aligned_rf_wt$train
+test_rf_wt_raw  <- aligned_rf_wt$test
+
+# Drop train-constant predictors
+is_constant_rf_wt <- sapply(train_rf_wt_raw %>% dplyr::select(-CASE_ID, -SevereBinary), function(x) {
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
+  length(ux) <= 1
+})
+
+if (any(is_constant_rf_wt)) {
+  cat("Dropping class-weighted RF train-constant predictors:\n")
+  print(names(is_constant_rf_wt)[is_constant_rf_wt])
+
+  keep_cols_rf_wt <- c("CASE_ID", "SevereBinary", names(is_constant_rf_wt)[!is_constant_rf_wt])
+  train_rf_wt_raw <- train_rf_wt_raw %>% dplyr::select(all_of(keep_cols_rf_wt))
+  test_rf_wt_raw  <- test_rf_wt_raw  %>% dplyr::select(all_of(keep_cols_rf_wt))
+}
+
+train_rf_wt <- train_rf_wt_raw %>% dplyr::select(-CASE_ID)
+test_rf_wt  <- test_rf_wt_raw  %>% dplyr::select(-CASE_ID)
+
+train_rf_wt$SevereBinary <- factor(train_rf_wt$SevereBinary, levels = c("Other", "Severe/Fatal"))
+test_rf_wt$SevereBinary  <- factor(test_rf_wt$SevereBinary,  levels = c("Other", "Severe/Fatal"))
+
+# Weight the minority class more heavily.
+# Because levels are c("Other", "Severe/Fatal"), the weights must follow that order.
+class_counts <- table(train_rf_wt$SevereBinary)
+w_other <- 1
+w_severe <- as.numeric(class_counts["Other"] / class_counts["Severe/Fatal"])
+
+rf_class_weights <- c(w_other, w_severe)
+
+cat("Training class counts:\n")
+print(class_counts)
+cat("\nClass weights used (order = levels(train_rf_wt$SevereBinary)):\n")
+print(rf_class_weights)
+
+p_rf_wt <- ncol(train_rf_wt) - 1
+mtry_rf_wt <- max(1, floor(sqrt(p_rf_wt)))
+
+set.seed(544)
+rf_wt_fit <- ranger::ranger(
+  SevereBinary ~ .,
+  data = train_rf_wt,
+  probability = TRUE,
+  num.trees = 1000,
+  mtry = mtry_rf_wt,
+  min.node.size = 10,
+  importance = "permutation",
+  respect.unordered.factors = "order",
+  class.weights = rf_class_weights,
+  seed = 544
+)
+
+rf_wt_test_phat <- predict(rf_wt_fit, data = test_rf_wt)$predictions[, "Severe/Fatal"]
+
+rf_wt_auc <- as.numeric(
+  pROC::auc(
+    pROC::roc(
+      response = test_rf_wt$SevereBinary,
+      predictor = rf_wt_test_phat,
+      levels = c("Other", "Severe/Fatal"),
+      quiet = TRUE
+    )
+  )
+)
+
+prev_rf_wt <- mean(train_rf_wt$SevereBinary == "Severe/Fatal")
+
+rf_wt_metrics_05 <- binary_metrics(test_rf_wt$SevereBinary, rf_wt_test_phat, cutoff = 0.50)
+rf_wt_metrics_prev <- binary_metrics(test_rf_wt$SevereBinary, rf_wt_test_phat, cutoff = prev_rf_wt)
+
+cat("\n", rf_wt_name, "TEST AUC:", round(rf_wt_auc, 4), "\n", sep = "")
+
+cat("\nMetrics at cutoff = 0.50\n")
+print(rf_wt_metrics_05)
+
+cat("\nMetrics at cutoff = prevalence\n")
+print(rf_wt_metrics_prev)
+
+cat("\nConfusion matrix (cutoff = 0.50):\n")
+print(table(
+  Pred = factor(ifelse(rf_wt_test_phat >= 0.5, "Severe/Fatal", "Other"),
+                levels = c("Other", "Severe/Fatal")),
+  Truth = test_rf_wt$SevereBinary
+))
+
+cat("\nConfusion matrix (cutoff = prevalence):\n")
+print(table(
+  Pred = factor(ifelse(rf_wt_test_phat >= prev_rf_wt, "Severe/Fatal", "Other"),
+                levels = c("Other", "Severe/Fatal")),
+  Truth = test_rf_wt$SevereBinary
+))
+
+rf_wt_importance_tbl <- data.frame(
+  variable = names(rf_wt_fit$variable.importance),
+  importance = as.numeric(rf_wt_fit$variable.importance),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::arrange(dplyr::desc(importance))
+
+cat("\nTop 20 variables by permutation importance:\n")
+print(head(rf_wt_importance_tbl, 20))
+```
+
 # Model Comparison
 ```{r all_model_compare_original_and_undersampled, message=FALSE, warning=FALSE}
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
@@ -4371,6 +4752,9 @@ build_model_rows <- function(model_name, truth, prob,
 
 all_model_rows <- list()
 
+# -------------------------
+# Original models
+# -------------------------
 if (exists("test_set") && exists("test_phat")) {
   all_model_rows[["baseline_original"]] <- build_model_rows(
     model_name = "Baseline GLM",
@@ -4407,6 +4791,30 @@ if (exists("test_y_subgroup") && exists("test_phat_subgroup")) {
   )
 }
 
+# -------------------------
+# Original random forests
+# -------------------------
+if (exists("rf_frames") && exists("rf_test_phat")) {
+  all_model_rows[["rf_original"]] <- build_model_rows(
+    model_name = "Random Forest",
+    truth = rf_frames$test$SevereBinary,
+    prob  = as.numeric(rf_test_phat),
+    include_prevalence_row = TRUE
+  )
+}
+
+if (exists("test_rf_wt") && exists("rf_wt_test_phat")) {
+  all_model_rows[["rf_class_weighted"]] <- build_model_rows(
+    model_name = "Random Forest (Class-Weighted)",
+    truth = test_rf_wt$SevereBinary,
+    prob  = as.numeric(rf_wt_test_phat),
+    include_prevalence_row = TRUE
+  )
+}
+
+# -------------------------
+# Undersampled models
+# -------------------------
 if (exists("test_set_us") && exists("baseline_glm_us_test_phat")) {
   all_model_rows[["baseline_us"]] <- build_model_rows(
     model_name = "Baseline GLM (Undersampled 1:1)",
@@ -4439,6 +4847,15 @@ if (exists("test_sub_us") && exists("subgroup_extension_glm_us_test_phat")) {
     model_name = "Baseline GLM + Subgroup Extension (Undersampled 1:1)",
     truth = test_sub_us$SevereBinary,
     prob  = as.numeric(subgroup_extension_glm_us_test_phat),
+    include_prevalence_row = FALSE
+  )
+}
+
+if (exists("rf_us_frames") && exists("rf_us_test_phat")) {
+  all_model_rows[["rf_us"]] <- build_model_rows(
+    model_name = "Random Forest (Undersampled 1:1)",
+    truth = rf_us_frames$test$SevereBinary,
+    prob  = as.numeric(rf_us_test_phat),
     include_prevalence_row = FALSE
   )
 }
