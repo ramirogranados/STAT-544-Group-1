@@ -1,9 +1,9 @@
 ---
 title: "STAT 544 - SWITRS Crash Severity Notebook (Rebuilt for Correctly Merged Data)"
 output:
-  html_notebook: default
-  pdf_document: default
   html_document: default
+  pdf_document: default
+  html_notebook: default 
 ---
 
 # Package Chunk
@@ -469,7 +469,8 @@ leakage_vars <- c(
   "COUNT_PED_KILLED", "COUNT_PED_INJURED",
   "COUNT_BICYCLIST_KILLED", "COUNT_BICYCLIST_INJURED",
   "COUNT_MC_KILLED", "COUNT_MC_INJURED",
-  "n_victims_killed", "any_victim_ksi"
+  "n_victims_killed", "any_victim_ksi","HIT_AND_RUN",
+  "COUNT_COMPLAINT_PAIN"
 )
 
 leakage_vars <- intersect(leakage_vars, names(switrs_reduced))
