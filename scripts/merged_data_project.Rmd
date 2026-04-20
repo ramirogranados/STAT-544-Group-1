@@ -2286,9 +2286,15 @@ violation_table_for_day <- function(data, day_name,
       .groups = "drop"
     ) %>%
     dplyr::mutate(
-      percent = 100 * count / sum(count)
+      percent = 100 * count / sum(count),
+      severe_percent = 100 * severe_count / count,
+      severe_percent_of_day = 100 * severe_count / sum(count)
     ) %>%
-    dplyr::arrange(dplyr::desc(severe_count), dplyr::desc(count), dplyr::desc(percent))
+    dplyr::arrange(
+      dplyr::desc(severe_percent),
+      dplyr::desc(severe_count),
+      dplyr::desc(count)
+    )
 
   names(out)[names(out) == "viol_label"] <- day_name
   out
