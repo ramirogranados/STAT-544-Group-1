@@ -2091,6 +2091,217 @@ vars_to_plot <- intersect(
 purrr::walk(vars_to_plot, ~ plot_severity_by_variable(.x))
 ```
 
+# EDA: Trend over time (overall crash volume + severe crash count/share)
+```{r yearly_trends, message=FALSE, warning=FALSE}
+if (!exists("switrs_reduced")) stop("switrs_reduced not found.")
+if (!("SevereBinary" %in% names(switrs_reduced))) stop("SevereBinary not found in switrs_reduced.")
+
+trend_df <- switrs_reduced
+
+# Build/repair year if needed
+if (!("year" %in% names(trend_df))) {
+  if ("ACCIDENT_YEAR" %in% names(trend_df)) {
+    trend_df <- trend_df %>%
+      dplyr::mutate(year = suppressWarnings(as.integer(as.character(ACCIDENT_YEAR))))
+  } else if ("collision_date" %in% names(trend_df)) {
+    trend_df <- trend_df %>%
+      dplyr::mutate(year = as.integer(format(collision_date, "%Y")))
+  } else if ("COLLISION_DATE" %in% names(trend_df)) {
+    parse_date_multi <- function(x) {
+      x <- as.character(x)
+      x <- trimws(x)
+      x[x %in% c("", "Not Stated", "UNKNOWN", "NA", "N/A", "NULL", "null")] <- NA_character_
+
+      d1 <- suppressWarnings(as.Date(x, format = "%Y%m%d"))
+      d2 <- suppressWarnings(as.Date(x, format = "%Y-%m-%d"))
+      d3 <- suppressWarnings(as.Date(x, format = "%m/%d/%Y"))
+
+      out <- d1
+      out[is.na(out)] <- d2[is.na(out)]
+      out[is.na(out)] <- d3[is.na(out)]
+      out
+    }
+
+    trend_df <- trend_df %>%
+      dplyr::mutate(
+        collision_date_tmp = parse_date_multi(COLLISION_DATE),
+        year = as.integer(format(collision_date_tmp, "%Y"))
+      )
+  } else {
+    stop("Need one of: year, ACCIDENT_YEAR, collision_date, or COLLISION_DATE.")
+  }
+}
+
+# Create yearly summary table
+yearly_trend_tbl <- trend_df %>%
+  dplyr::mutate(year = suppressWarnings(as.integer(as.character(year)))) %>%
+  dplyr::filter(!is.na(year), !is.na(SevereBinary)) %>%
+  dplyr::group_by(year) %>%
+  dplyr::summarise(
+    total_crashes = dplyr::n(),
+    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    other_n = sum(SevereBinary == "Other", na.rm = TRUE),
+    severe_rate = severe_n / total_crashes,
+    severe_per_100 = 100 * severe_n / total_crashes,
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(year)
+
+cat("Yearly crash trend table:\n")
+print(yearly_trend_tbl)
+
+# Optional prettier display table
+yearly_trend_display <- yearly_trend_tbl %>%
+  dplyr::mutate(
+    severe_rate_pct = scales::percent(severe_rate, accuracy = 0.1)
+  ) %>%
+  dplyr::select(
+    year,
+    total_crashes,
+    severe_n,
+    other_n,
+    severe_per_100,
+    severe_rate_pct
+  )
+
+cat("\nYearly display table:\n")
+print(yearly_trend_display)
+
+# 1) Total crashes by year
+ggplot(yearly_trend_tbl, aes(x = year, y = total_crashes)) +
+  geom_line() +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Linear Trend in Total Crashes by Year",
+    x = "Year",
+    y = "Number of crashes"
+  ) +
+  scale_x_continuous(breaks = yearly_trend_tbl$year) +
+  scale_y_continuous(labels = scales::comma)
+
+# 2) Severe/Fatal count by year
+ggplot(yearly_trend_tbl, aes(x = year, y = severe_n)) +
+  geom_line() +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Linear Trend in Severe/Fatal Crash Count by Year",
+    x = "Year",
+    y = "Severe/Fatal crash count"
+  ) +
+  scale_x_continuous(breaks = yearly_trend_tbl$year) +
+  scale_y_continuous(labels = scales::comma)
+
+# 3) Severe/Fatal rate by year
+ggplot(yearly_trend_tbl, aes(x = year, y = severe_rate)) +
+  geom_line() +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Linear Trend in Severe/Fatal Crash Rate by Year",
+    x = "Year",
+    y = "Severe/Fatal share of crashes"
+  ) +
+  scale_x_continuous(breaks = yearly_trend_tbl$year) +
+  scale_y_continuous(labels = scales::percent)
+```
+
+# Violation count/percent table for one specific day
+```{r}
+violation_table_for_day <- function(data, day_name,
+                                    day_var = "DAY_OF_WEEK",
+                                    viol_var = "PCF_VIOL_CATEGORY") {
+  if (!(day_var %in% names(data)) || !(viol_var %in% names(data))) return(NULL)
+  if (!("SevereBinary" %in% names(data))) return(NULL)
+
+  day_map <- c(
+    "1" = "Monday", "2" = "Tuesday", "3" = "Wednesday", "4" = "Thursday",
+    "5" = "Friday", "6" = "Saturday", "7" = "Sunday",
+    "Mon" = "Monday", "Tue" = "Tuesday", "Wed" = "Wednesday",
+    "Thu" = "Thursday", "Fri" = "Friday", "Sat" = "Saturday", "Sun" = "Sunday"
+  )
+
+  pcf_map <- c(
+    "01" = "DUI (Alcohol or Drug)",
+    "02" = "Impeding Traffic",
+    "03" = "Unsafe Speed",
+    "04" = "Following Too Closely",
+    "05" = "Wrong Side of Road",
+    "06" = "Improper Passing",
+    "07" = "Unsafe Lane Change",
+    "08" = "Improper Turning",
+    "09" = "Automobile Right-of-Way",
+    "10" = "Pedestrian Right-of-Way",
+    "11" = "Pedestrian Violation",
+    "12" = "Traffic Signals and Signs",
+    "13" = "Hazardous Parking",
+    "14" = "Lights",
+    "15" = "Brakes",
+    "16" = "Other Equipment",
+    "17" = "Other Hazardous Violation",
+    "18" = "Other Than Driver/Pedestrian",
+    "21" = "Unsafe Starting or Backing",
+    "22" = "Other Improper Driving",
+    "23" = "Pedestrian/Other DUI",
+    "24" = "Fell Asleep",
+    "00" = "Unknown"
+  )
+
+  df <- data %>%
+    dplyr::transmute(
+      day = as.character(.data[[day_var]]),
+      viol = as.character(.data[[viol_var]]),
+      SevereBinary = as.character(SevereBinary)
+    ) %>%
+    dplyr::mutate(
+      day  = ifelse(is.na(day)  | trimws(day)  == "", "Not Stated", trimws(day)),
+      viol = ifelse(is.na(viol) | trimws(viol) == "", "Not Stated", trimws(viol)),
+      viol = stringr::str_pad(viol, width = 2, side = "left", pad = "0")
+    )
+
+  if (exists("legend_maps") && day_var %in% names(legend_maps)) {
+    df <- df %>%
+      dplyr::mutate(day_label = dplyr::recode(day, !!!legend_maps[[day_var]], .default = day))
+  } else {
+    df <- df %>%
+      dplyr::mutate(day_label = dplyr::recode(day, !!!day_map, .default = day))
+  }
+
+  if (exists("legend_maps") && viol_var %in% names(legend_maps)) {
+    df <- df %>%
+      dplyr::mutate(viol_label = dplyr::recode(viol, !!!legend_maps[[viol_var]], .default = viol))
+  } else {
+    df <- df %>%
+      dplyr::mutate(viol_label = dplyr::recode(viol, !!!pcf_map, .default = viol))
+  }
+
+  out <- df %>%
+    dplyr::filter(day_label == day_name) %>%
+    dplyr::filter(!viol_label %in% c("Unknown", "Not Stated", "00", "-")) %>%
+    dplyr::group_by(viol_label) %>%
+    dplyr::summarise(
+      count = dplyr::n(),
+      severe_count = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      percent = 100 * count / sum(count)
+    ) %>%
+    dplyr::arrange(dplyr::desc(severe_count), dplyr::desc(count), dplyr::desc(percent))
+
+  names(out)[names(out) == "viol_label"] <- day_name
+  out
+}
+
+day_order <- c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday")
+
+day_violation_tables <- purrr::map(day_order, ~ violation_table_for_day(switrs_reduced, .x))
+names(day_violation_tables) <- day_order
+
+day_violation_tables
+```
+
 # Correlation Check (numeric predictors)
 ```{r}
 num_vars <- names(switrs_reduced)[sapply(switrs_reduced, is.numeric)]
