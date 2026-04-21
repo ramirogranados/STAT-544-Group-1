@@ -1,9 +1,9 @@
 ---
 title: "STAT 544 - SWITRS Crash Severity Notebook (Rebuilt for Correctly Merged Data)"
 output:
-  html_document: default
-  pdf_document: default
   html_notebook: default 
+  pdf_document: default
+  html_document: default
 ---
 
 # Package Chunk
@@ -37,6 +37,36 @@ library(broom)
 
 theme_set(theme_minimal(base_size = 12))
 ```
+
+# Custom color palette
+```{r}
+outcome_palette <- c(
+  "Other" = "#A8D5BA",
+  "Severe/Fatal" = "#1B5E20"
+)
+
+yesno_palette <- c(
+  "No" = "#A8D5BA",
+  "Yes" = "#1B5E20"
+)
+
+scale_fill_outcome_switrs <- function(...) {
+  scale_fill_manual(values = outcome_palette, ...)
+}
+
+scale_color_outcome_switrs <- function(...) {
+  scale_color_manual(values = outcome_palette, ...)
+}
+
+scale_fill_yesno_switrs <- function(...) {
+  scale_fill_manual(values = yesno_palette, ...)
+}
+
+scale_color_yesno_switrs <- function(...) {
+  scale_color_manual(values = yesno_palette, ...)
+}
+```
+
 
 # Load data (correctly merged dataset)
 ```{r}
@@ -1104,7 +1134,7 @@ cat("Severe/Fatal rate per 100 crashes by month:\n")
 print(month_tbl)
 
 ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
-  geom_col() +
+  geom_col(fill = "#1B5E20") +
   geom_text(aes(label = round(severe_per_100, 2)), vjust = -0.3, size = 3.5) +
   labs(
     title = "Severe/Fatal Rate by Month",
@@ -1112,6 +1142,48 @@ ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
     y = "Severe/Fatal per 100 crashes"
   ) +
   theme(panel.grid.minor = element_blank())
+```
+
+# Bar chart: Severe/Fatal crash rate by day of week
+```{r severity_by_day_bar, message=FALSE, warning=FALSE}
+if (!all(c("DAY_OF_WEEK", "SevereBinary") %in% names(switrs_reduced))) {
+  stop("Need DAY_OF_WEEK and SevereBinary in switrs_reduced.")
+}
+
+day_order <- c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday")
+
+day_severity_tbl <- switrs_reduced %>%
+  dplyr::filter(!is.na(DAY_OF_WEEK), !is.na(SevereBinary)) %>%
+  dplyr::mutate(
+    day = as.character(DAY_OF_WEEK),
+    day = factor(day, levels = day_order)
+  ) %>%
+  dplyr::filter(!is.na(day)) %>%
+  dplyr::group_by(day) %>%
+  dplyr::summarise(
+    total_crashes = dplyr::n(),
+    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    other_n = sum(SevereBinary == "Other", na.rm = TRUE),
+    severe_per_100 = 100 * severe_n / total_crashes,
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(day)
+
+cat("Crash severity by day of week:\n")
+print(day_severity_tbl)
+
+ggplot(day_severity_tbl, aes(x = day, y = severe_per_100)) +
+  geom_col(fill = "#1B5E20") +
+  geom_text(aes(label = round(severe_per_100, 2)), vjust = -0.3, size = 3.5) +
+  labs(
+    title = "Severe/Fatal Crash Rate by Day of Week",
+    x = "Day of Week",
+    y = "Severe/Fatal per 100 crashes"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank()
+  )
 ```
 
 # Statistics report chunk: Hypothesis tests on Severe/Fatal proportions (week 8 deliverable)
@@ -1683,7 +1755,7 @@ if (exists("hotspots_by_count") && nrow(hotspots_by_count) > 0) {
     slice_head(n = 15) %>%
     mutate(location_key = factor(location_key, levels = rev(location_key))) %>%
     ggplot(aes(x = location_key, y = severe_n)) +
-    geom_col() +
+    geom_col(fill = "#1B5E20") +
     coord_flip(clip = "off") +
     labs(
       title = "Top 15 Hotspots by Severe/Fatal Count",
@@ -1705,7 +1777,7 @@ if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
     slice_head(n = 15) %>%
     mutate(scenario = factor(scenario, levels = rev(scenario))) %>%
     ggplot(aes(x = scenario, y = severe_per_100)) +
-    geom_col() +
+    geom_col(fill = "#1B5E20") + 
     coord_flip(clip = "off") +
     labs(
       title = "Top 15 Scenarios by Severe/Fatal Rate",
@@ -1751,20 +1823,20 @@ if (length(interaction_vars) > 0) {
     )
 
   p3 <- interaction_tbl %>%
-    ggplot(aes(x = term_label, y = severe_per_100, fill = group)) +
-    geom_col(position = position_dodge(width = 0.8)) +
-    coord_flip(clip = "off") +
-    labs(
-      title = "Compound Risk Conditions (Interaction Terms)",
-      subtitle = "Severe/Fatal rate per 100 crashes: compare “Yes” vs “No” for each condition",
-      x = NULL,
-      y = "Severe/Fatal per 100 crashes",
-      fill = "Condition present?"
-    ) +
-    base_theme_fix
+  ggplot(aes(x = term_label, y = severe_per_100, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  coord_flip(clip = "off") +
+  scale_fill_yesno_switrs() +
+  labs(
+    title = "Compound Risk Conditions (Interaction Terms)",
+    subtitle = "Severe/Fatal rate per 100 crashes: compare “Yes” vs “No” for each condition",
+    x = NULL,
+    y = "Severe/Fatal per 100 crashes",
+    fill = "Condition present?"
+  ) +
+  base_theme_fix
 
-  print(p3)
-
+print(p3)
 } else {
   cat("No interaction variables found (night_dui/rain_speed/ped_dark). Re-run the time-feature chunk if needed.\n")
 }
@@ -2169,9 +2241,9 @@ print(yearly_trend_display)
 
 # 1) Total crashes by year
 ggplot(yearly_trend_tbl, aes(x = year, y = total_crashes)) +
-  geom_line() +
-  geom_point() +
-  geom_smooth(method = "lm", se = FALSE) +
+  geom_line(color = "#1B5E20", linewidth = 1) +
+  geom_point(color = "#1B5E20", size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "#A8D5BA") +
   labs(
     title = "Linear Trend in Total Crashes by Year",
     x = "Year",
@@ -2182,9 +2254,9 @@ ggplot(yearly_trend_tbl, aes(x = year, y = total_crashes)) +
 
 # 2) Severe/Fatal count by year
 ggplot(yearly_trend_tbl, aes(x = year, y = severe_n)) +
-  geom_line() +
-  geom_point() +
-  geom_smooth(method = "lm", se = FALSE) +
+  geom_line(color = "#1B5E20", linewidth = 1) +
+  geom_point(color = "#1B5E20", size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "#A8D5BA") +
   labs(
     title = "Linear Trend in Severe/Fatal Crash Count by Year",
     x = "Year",
@@ -2195,9 +2267,9 @@ ggplot(yearly_trend_tbl, aes(x = year, y = severe_n)) +
 
 # 3) Severe/Fatal rate by year
 ggplot(yearly_trend_tbl, aes(x = year, y = severe_rate)) +
-  geom_line() +
-  geom_point() +
-  geom_smooth(method = "lm", se = FALSE) +
+  geom_line(color = "#1B5E20", linewidth = 1) +
+  geom_point(color = "#1B5E20", size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "#A8D5BA") +
   labs(
     title = "Linear Trend in Severe/Fatal Crash Rate by Year",
     x = "Year",
@@ -2645,6 +2717,380 @@ or_tbl <- data.frame(
 
 cat("\nTop 20", baseline_glm_name, "odds ratios by |log(OR)| (FAST Wald CI, train fit):\n")
 print(head(or_tbl, 20))
+```
+
+# Odds ratios of severe/fatal crash by DAY_OF_WEEK (adjusted model)
+```{r message=FALSE, warning=FALSE}
+set.seed(544) 
+
+if (!exists("switrs_model_ready")) stop("switrs_model_ready not found. Run shared_imputation first.")
+if (!exists("train_data")) stop("train_data not found. Run shared_train_test_split first.")
+if (!exists("expand_predictors_with_miss")) stop("expand_predictors_with_miss() not found. Run shared_imputation first.")
+if (!exists("leakage_vars")) leakage_vars <- character(0)
+
+# Use the same general policy-style baseline predictors,
+# but swap in raw DAY_OF_WEEK and remove overlapping grouped timing features.
+day_or_predictors <- intersect(
+  c(
+    "DAY_OF_WEEK",
+    "year",
+    "night",
+    "weather_group",
+    "lighting_group",
+    "ROAD_SURFACE",
+    "INTERSECTION",
+    "STATE_HWY_IND",
+    "TYPE_OF_COLLISION",
+    "PRIMARY_COLL_FACTOR",
+    "school_bus_proxy",
+    "pcf_dui",
+    "pcf_speed",
+    "ALCOHOL_INVOLVED",
+    "HIT_AND_RUN",
+    "is_ped",
+    "BICYCLE_ACCIDENT",
+    "MOTORCYCLE_ACCIDENT",
+    "TRUCK_ACCIDENT",
+    "night_dui",
+    "rain_speed",
+    "ped_dark",
+    "n_parties",
+    "any_party_alcohol",
+    "any_party_drug",
+    "any_party_at_fault",
+    "mean_party_age"
+  ),
+  names(switrs_model_ready)
+)
+
+day_or_predictors <- setdiff(day_or_predictors, leakage_vars)
+day_or_predictors_final <- expand_predictors_with_miss(train_data, day_or_predictors)
+
+day_or_train_raw <- train_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", day_or_predictors_final))) %>%
+  dplyr::mutate(
+    DAY_OF_WEEK = as.character(DAY_OF_WEEK),
+    DAY_OF_WEEK = dplyr::na_if(DAY_OF_WEEK, "Not Stated"),
+    DAY_OF_WEEK = factor(
+      DAY_OF_WEEK,
+      levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday")
+    )
+  ) %>%
+  dplyr::filter(!is.na(SevereBinary), !is.na(DAY_OF_WEEK))
+
+# Drop train-constant predictors
+is_constant_day <- sapply(
+  day_or_train_raw %>% dplyr::select(-CASE_ID, -SevereBinary),
+  function(x) {
+    ux <- unique(x)
+    ux <- ux[!is.na(ux)]
+    length(ux) <= 1
+  }
+)
+
+if (any(is_constant_day)) {
+  cat("Dropping train-constant predictors for day-of-week OR model:\n")
+  print(names(is_constant_day)[is_constant_day])
+
+  keep_cols_day <- c("CASE_ID", "SevereBinary", names(is_constant_day)[!is_constant_day])
+  day_or_train_raw <- day_or_train_raw %>% dplyr::select(all_of(keep_cols_day))
+}
+
+# Reuse separator check if it already exists; otherwise define it here
+if (!exists("is_perfect_separator")) {
+  is_perfect_separator <- function(x, y, min_level_n = 30) {
+    if (is.character(x) || is.factor(x)) {
+      tab <- table(x, y, useNA = "no")
+      lvl_n <- rowSums(tab)
+      tab2 <- tab[lvl_n >= min_level_n, , drop = FALSE]
+      if (nrow(tab2) == 0) return(FALSE)
+      any(tab2[, "Other"] == 0 | tab2[, "Severe/Fatal"] == 0)
+    } else if (is.numeric(x) || is.integer(x)) {
+      ux <- sort(unique(x))
+      ux <- ux[!is.na(ux)]
+      if (length(ux) <= 1) return(FALSE)
+
+      qs <- unique(stats::quantile(x, probs = seq(0.1, 0.9, by = 0.1), na.rm = TRUE))
+      qs <- qs[!is.na(qs)]
+
+      for (cut in qs) {
+        left  <- y[x <= cut]
+        right <- y[x > cut]
+
+        if (length(left) >= min_level_n && length(right) >= min_level_n) {
+          if (all(left == "Other") || all(left == "Severe/Fatal") ||
+              all(right == "Other") || all(right == "Severe/Fatal")) {
+            return(TRUE)
+          }
+        }
+      }
+      FALSE
+    } else {
+      FALSE
+    }
+  }
+}
+
+y_day <- day_or_train_raw$SevereBinary
+pred_names_day <- setdiff(names(day_or_train_raw), c("CASE_ID", "SevereBinary"))
+
+sep_flags_day <- sapply(pred_names_day, function(v) {
+  is_perfect_separator(day_or_train_raw[[v]], y_day)
+})
+bad_vars_day <- names(sep_flags_day)[sep_flags_day]
+
+cat("Day-of-week OR model predictors dropped for practical separation:", length(bad_vars_day), "\n")
+if (length(bad_vars_day) > 0) print(bad_vars_day)
+
+if (length(bad_vars_day) > 0) {
+  day_or_train_raw <- day_or_train_raw %>% dplyr::select(-dplyr::all_of(bad_vars_day))
+}
+
+day_or_train <- day_or_train_raw %>% dplyr::select(-CASE_ID)
+
+day_or_glm_fit <- glm(
+  SevereBinary ~ .,
+  data = day_or_train,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+day_or_coefs <- summary(day_or_glm_fit)$coefficients
+
+day_or_tbl <- data.frame(
+  term = rownames(day_or_coefs),
+  estimate = day_or_coefs[, "Estimate"],
+  std.error = day_or_coefs[, "Std. Error"],
+  p.value = day_or_coefs[, "Pr(>|z|)"],
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::filter(grepl("^DAY_OF_WEEK", term)) %>%
+  dplyr::mutate(
+    day = gsub("^DAY_OF_WEEK", "", term),
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error)
+  ) %>%
+  dplyr::select(day, OR, conf.low, conf.high, p.value)
+
+# Add Monday as the reference level
+day_or_tbl <- dplyr::bind_rows(
+  data.frame(
+    day = "Monday",
+    OR = 1,
+    conf.low = 1,
+    conf.high = 1,
+    p.value = NA_real_
+  ),
+  day_or_tbl
+) %>%
+  dplyr::mutate(
+    day = factor(day, levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))
+  ) %>%
+  dplyr::arrange(day)
+
+cat("Adjusted odds ratios by day of week (reference = Monday):\n")
+print(day_or_tbl)
+
+ggplot(day_or_tbl, aes(x = OR, y = day)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray40") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.15, color = "#1B5E20") +
+  geom_point(size = 3, color = "#1B5E20") +
+  labs(
+    title = "Adjusted Odds Ratios of Severe/Fatal Crash by Day of Week",
+    subtitle = "Reference day = Monday",
+    x = "Odds Ratio",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+```
+
+# Odds ratios of severe/fatal crash by DAY_OF_WEEK (adjusted model)
+```{r day_of_week_odds_ratio_plot, message=FALSE, warning=FALSE}
+set.seed(544)
+
+if (!exists("switrs_model_ready")) stop("switrs_model_ready not found. Run shared_imputation first.")
+if (!exists("train_data")) stop("train_data not found. Run shared_train_test_split first.")
+if (!exists("expand_predictors_with_miss")) stop("expand_predictors_with_miss() not found. Run shared_imputation first.")
+if (!exists("leakage_vars")) leakage_vars <- character(0)
+
+# Use the same general policy-style baseline predictors,
+# but swap in raw DAY_OF_WEEK and remove overlapping grouped timing features.
+day_or_predictors <- intersect(
+  c(
+    "DAY_OF_WEEK",
+    "year",
+    "night",
+    "weather_group",
+    "lighting_group",
+    "ROAD_SURFACE",
+    "INTERSECTION",
+    "STATE_HWY_IND",
+    "TYPE_OF_COLLISION",
+    "PRIMARY_COLL_FACTOR",
+    "school_bus_proxy",
+    "pcf_dui",
+    "pcf_speed",
+    "ALCOHOL_INVOLVED",
+    "HIT_AND_RUN",
+    "is_ped",
+    "BICYCLE_ACCIDENT",
+    "MOTORCYCLE_ACCIDENT",
+    "TRUCK_ACCIDENT",
+    "night_dui",
+    "rain_speed",
+    "ped_dark",
+    "n_parties",
+    "any_party_alcohol",
+    "any_party_drug",
+    "any_party_at_fault",
+    "mean_party_age"
+  ),
+  names(switrs_model_ready)
+)
+
+day_or_predictors <- setdiff(day_or_predictors, leakage_vars)
+day_or_predictors_final <- expand_predictors_with_miss(train_data, day_or_predictors)
+
+day_or_train_raw <- train_data %>%
+  dplyr::select(all_of(c("CASE_ID", "SevereBinary", day_or_predictors_final))) %>%
+  dplyr::mutate(
+    DAY_OF_WEEK = as.character(DAY_OF_WEEK),
+    DAY_OF_WEEK = dplyr::na_if(DAY_OF_WEEK, "Not Stated"),
+    DAY_OF_WEEK = factor(
+    DAY_OF_WEEK,
+    levels = c("Tuesday","Monday","Wednesday","Thursday","Friday","Saturday","Sunday")
+)
+  ) %>%
+  dplyr::filter(!is.na(SevereBinary), !is.na(DAY_OF_WEEK))
+
+# Drop train-constant predictors
+is_constant_day <- sapply(
+  day_or_train_raw %>% dplyr::select(-CASE_ID, -SevereBinary),
+  function(x) {
+    ux <- unique(x)
+    ux <- ux[!is.na(ux)]
+    length(ux) <= 1
+  }
+)
+
+if (any(is_constant_day)) {
+  cat("Dropping train-constant predictors for day-of-week OR model:\n")
+  print(names(is_constant_day)[is_constant_day])
+
+  keep_cols_day <- c("CASE_ID", "SevereBinary", names(is_constant_day)[!is_constant_day])
+  day_or_train_raw <- day_or_train_raw %>% dplyr::select(all_of(keep_cols_day))
+}
+
+# Reuse separator check if it already exists; otherwise define it here
+if (!exists("is_perfect_separator")) {
+  is_perfect_separator <- function(x, y, min_level_n = 30) {
+    if (is.character(x) || is.factor(x)) {
+      tab <- table(x, y, useNA = "no")
+      lvl_n <- rowSums(tab)
+      tab2 <- tab[lvl_n >= min_level_n, , drop = FALSE]
+      if (nrow(tab2) == 0) return(FALSE)
+      any(tab2[, "Other"] == 0 | tab2[, "Severe/Fatal"] == 0)
+    } else if (is.numeric(x) || is.integer(x)) {
+      ux <- sort(unique(x))
+      ux <- ux[!is.na(ux)]
+      if (length(ux) <= 1) return(FALSE)
+
+      qs <- unique(stats::quantile(x, probs = seq(0.1, 0.9, by = 0.1), na.rm = TRUE))
+      qs <- qs[!is.na(qs)]
+
+      for (cut in qs) {
+        left  <- y[x <= cut]
+        right <- y[x > cut]
+
+        if (length(left) >= min_level_n && length(right) >= min_level_n) {
+          if (all(left == "Other") || all(left == "Severe/Fatal") ||
+              all(right == "Other") || all(right == "Severe/Fatal")) {
+            return(TRUE)
+          }
+        }
+      }
+      FALSE
+    } else {
+      FALSE
+    }
+  }
+}
+
+y_day <- day_or_train_raw$SevereBinary
+pred_names_day <- setdiff(names(day_or_train_raw), c("CASE_ID", "SevereBinary"))
+
+sep_flags_day <- sapply(pred_names_day, function(v) {
+  is_perfect_separator(day_or_train_raw[[v]], y_day)
+})
+bad_vars_day <- names(sep_flags_day)[sep_flags_day]
+
+cat("Day-of-week OR model predictors dropped for practical separation:", length(bad_vars_day), "\n")
+if (length(bad_vars_day) > 0) print(bad_vars_day)
+
+if (length(bad_vars_day) > 0) {
+  day_or_train_raw <- day_or_train_raw %>% dplyr::select(-dplyr::all_of(bad_vars_day))
+}
+
+day_or_train <- day_or_train_raw %>% dplyr::select(-CASE_ID)
+
+day_or_glm_fit <- glm(
+  SevereBinary ~ .,
+  data = day_or_train,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+day_or_coefs <- summary(day_or_glm_fit)$coefficients
+
+day_or_tbl <- data.frame(
+  term = rownames(day_or_coefs),
+  estimate = day_or_coefs[, "Estimate"],
+  std.error = day_or_coefs[, "Std. Error"],
+  p.value = day_or_coefs[, "Pr(>|z|)"],
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::filter(grepl("^DAY_OF_WEEK", term)) %>%
+  dplyr::mutate(
+    day = gsub("^DAY_OF_WEEK", "", term),
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std.error),
+    conf.high = exp(estimate + 1.96 * std.error)
+  ) %>%
+  dplyr::select(day, OR, conf.low, conf.high, p.value)
+
+# Add Tuesday as the reference level
+day_or_tbl <- dplyr::bind_rows(
+  data.frame(
+    day = "Tuesday",
+    OR = 1,
+    conf.low = 1,
+    conf.high = 1,
+    p.value = NA_real_
+  ),
+  day_or_tbl
+) %>%
+  dplyr::mutate(
+    day = factor(day, levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))
+  ) %>%
+  dplyr::arrange(day)
+
+cat("Adjusted odds ratios by day of week (reference = Monday):\n")
+print(day_or_tbl)
+
+ggplot(day_or_tbl, aes(x = OR, y = day)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray40") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.15, color = "#1B5E20") +
+  geom_point(size = 3, color = "#1B5E20") +
+  labs(
+    title = "Adjusted Odds Ratios of Severe/Fatal Crash by Day of Week",
+    subtitle = "Reference day = Monday",
+    x = "Odds Ratio",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
 ```
 
 # Coefficient analysis
@@ -3448,7 +3894,7 @@ set.seed(544)
 
 targeted_scenario_glm_name <- "Targeted Scenario GLM"
 
-scenario_predictors <- intersect(
+scenario_predictors <- unique(intersect(
   c(
     "day_group",
     "night",
@@ -3457,14 +3903,17 @@ scenario_predictors <- intersect(
     "STATE_HWY_IND",
     "lighting_group",
     "pcf_dui",
+    "pcf_speed",
+    "is_rain",
     "friday_night",
     "ped_dark",
+    "rain_speed",
     "intersection_ped",
     "highway_night",
     "night_dui"
   ),
   names(switrs_model_ready)
-)
+))
 
 cat(targeted_scenario_glm_name, "predictors:\n")
 print(scenario_predictors)
@@ -3603,6 +4052,151 @@ or_tbl_scen <- data.frame(
 
 cat("\nTop", targeted_scenario_glm_name, "odds ratios:\n")
 print(head(or_tbl_scen, 15))
+```
+
+# Day-specific odds-ratio graphs: Night x DUI and Pedestrian involvement
+```{r day_specific_or_nightdui_ped, message=FALSE, warning=FALSE}
+set.seed(544)
+
+if (!exists("train_data")) {
+  stop("train_data not found. Run shared_train_test_split first.")
+}
+
+required_vars <- c("SevereBinary", "DAY_OF_WEEK", "night_dui", "is_ped")
+missing_vars <- setdiff(required_vars, names(train_data))
+if (length(missing_vars) > 0) {
+  stop("Missing required columns in train_data: ", paste(missing_vars, collapse = ", "))
+}
+
+day_levels_model <- c("Tuesday","Monday","Wednesday","Thursday","Friday","Saturday","Sunday")
+day_levels_plot  <- c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday")
+
+or_day_df <- train_data %>%
+  dplyr::select(SevereBinary, DAY_OF_WEEK, night_dui, is_ped) %>%
+  dplyr::mutate(
+    SevereBinary = factor(SevereBinary, levels = c("Other", "Severe/Fatal")),
+    DAY_OF_WEEK = as.character(DAY_OF_WEEK),
+    DAY_OF_WEEK = dplyr::na_if(DAY_OF_WEEK, "Not Stated"),
+    DAY_OF_WEEK = factor(DAY_OF_WEEK, levels = day_levels_model),
+    night_dui = factor(as.character(night_dui), levels = c("No", "Yes")),
+    is_ped    = factor(as.character(is_ped),    levels = c("No", "Yes"))
+  ) %>%
+  dplyr::filter(
+    !is.na(SevereBinary),
+    !is.na(DAY_OF_WEEK),
+    !is.na(night_dui),
+    !is.na(is_ped)
+  )
+
+# Focused interaction models
+fit_night_dui_day <- glm(
+  SevereBinary ~ DAY_OF_WEEK * night_dui,
+  data = or_day_df,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+fit_ped_day <- glm(
+  SevereBinary ~ DAY_OF_WEEK * is_ped,
+  data = or_day_df,
+  family = binomial(),
+  control = glm.control(maxit = 50)
+)
+
+find_interaction_term <- function(coef_names, day_var, day_name, exposure_var, exposure_level = "Yes") {
+  cand1 <- paste0(day_var, day_name, ":", exposure_var, exposure_level)
+  cand2 <- paste0(exposure_var, exposure_level, ":", day_var, day_name)
+
+  if (cand1 %in% coef_names) return(cand1)
+  if (cand2 %in% coef_names) return(cand2)
+  NA_character_
+}
+
+extract_day_specific_or <- function(fit, exposure_var,
+                                    day_var = "DAY_OF_WEEK",
+                                    ref_day = "Tuesday",
+                                    day_levels_plot = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"),
+                                    exposure_level = "Yes",
+                                    label_text = exposure_var) {
+
+  beta <- stats::coef(fit)
+  V <- stats::vcov(fit)
+  coef_names <- names(beta)
+
+  main_term <- paste0(exposure_var, exposure_level)
+  if (!(main_term %in% coef_names)) {
+    stop("Main effect term not found in model coefficients: ", main_term)
+  }
+
+  out <- lapply(day_levels_plot, function(d) {
+    L <- rep(0, length(beta))
+    names(L) <- coef_names
+
+    # Main exposure effect = reference-day OR
+    L[main_term] <- 1
+
+    # Add interaction term for non-reference days
+    if (d != ref_day) {
+      int_term <- find_interaction_term(coef_names, day_var, d, exposure_var, exposure_level)
+      if (!is.na(int_term)) L[int_term] <- 1
+    }
+
+    est <- sum(L * beta)
+    se  <- sqrt(as.numeric(t(L) %*% V %*% L))
+
+    data.frame(
+      day = d,
+      term = label_text,
+      log_or = est,
+      OR = exp(est),
+      conf.low = exp(est - 1.96 * se),
+      conf.high = exp(est + 1.96 * se),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  dplyr::bind_rows(out)
+}
+
+night_dui_day_or <- extract_day_specific_or(
+  fit = fit_night_dui_day,
+  exposure_var = "night_dui",
+  label_text = "Night x DUI (Yes vs No)"
+)
+
+ped_day_or <- extract_day_specific_or(
+  fit = fit_ped_day,
+  exposure_var = "is_ped",
+  label_text = "Pedestrian involved (Yes vs No)"
+)
+
+day_or_plot_tbl <- dplyr::bind_rows(night_dui_day_or, ped_day_or) %>%
+  dplyr::mutate(
+    day = factor(day, levels = day_levels_plot),
+    term = factor(term, levels = c("Night x DUI (Yes vs No)", "Pedestrian involved (Yes vs No)"))
+  )
+
+cat("Day-specific ORs for Night x DUI:\n")
+print(night_dui_day_or)
+
+cat("\nDay-specific ORs for Pedestrian involvement:\n")
+print(ped_day_or)
+
+ggplot(day_or_plot_tbl, aes(x = day, y = OR)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray40") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.15, color = "#1B5E20") +
+  geom_point(size = 3, color = "#1B5E20") +
+  facet_wrap(~ term, ncol = 1) +
+  labs(
+    title = "Day-Specific Odds Ratios for Severe/Fatal Crash",
+    subtitle = "Reference day = Tuesday; points above 1 indicate higher odds",
+    x = "Day of Week",
+    y = "Odds Ratio"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank()
+  )
 ```
 
 # Targeted subgroup extension model
