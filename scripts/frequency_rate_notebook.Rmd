@@ -1,9 +1,9 @@
 ---
 title: "STAT 544 - SWITRS Crash Severity Notebook (Rebuilt for Correctly Merged Data)"
 output:
-  html_notebook: default 
-  pdf_document: default
   html_document: default
+  pdf_document: default
+  html_notebook: default 
 ---
 
 # Package Chunk
@@ -507,6 +507,56 @@ cat("Leakage vars detected in data (will be banned from predictors):\n")
 print(leakage_vars)
 ```
 
+# Policy prioritization helpers
+```{r policy_priority_helpers}
+# What: Create helpers that classify tables by burden and rate simultaneously.
+# Why: Policy decisions should prioritize where the most harm happens, not rate alone.
+
+normalize_01 <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (!all(is.finite(rng)) || diff(rng) == 0) {
+    return(rep(0, length(x)))
+  }
+  (x - rng[1]) / diff(rng)
+}
+
+classify_burden_risk <- function(df,
+                                 burden_var = "severe_n",
+                                 risk_var = "severe_per_100",
+                                 burden_prob = 0.75,
+                                 risk_prob = 0.75) {
+  if (nrow(df) == 0) return(df)
+
+  burden_cut <- stats::quantile(df[[burden_var]], probs = burden_prob, na.rm = TRUE, names = FALSE)
+  risk_cut   <- stats::quantile(df[[risk_var]], probs = risk_prob,   na.rm = TRUE, names = FALSE)
+
+  out <- df %>%
+    mutate(
+      burden_tier = ifelse(.data[[burden_var]] >= burden_cut, "High burden", "Lower burden"),
+      risk_tier   = ifelse(.data[[risk_var]]   >= risk_cut,   "High rate",   "Lower rate"),
+      priority_tier = case_when(
+        burden_tier == "High burden" & risk_tier == "High rate"   ~ "Priority 1: High burden + high rate",
+        burden_tier == "High burden" & risk_tier == "Lower rate"  ~ "Priority 2: High burden + lower rate",
+        burden_tier == "Lower burden" & risk_tier == "High rate"  ~ "Priority 3: Lower burden + high rate",
+        TRUE                                                      ~ "Priority 4: Lower burden + lower rate"
+      ),
+      priority_tier = factor(
+        priority_tier,
+        levels = c(
+          "Priority 1: High burden + high rate",
+          "Priority 2: High burden + lower rate",
+          "Priority 3: Lower burden + high rate",
+          "Priority 4: Lower burden + lower rate"
+        )
+      )
+    )
+
+  out
+}
+
+cat("Policy-priority helpers loaded: normalize_01(), classify_burden_risk()\n")
+```
+
 # Location hotspots
 ```{r}
 # WHERE: Hotspot ranking using available location fields
@@ -566,19 +616,48 @@ hotspot_tbl <- switrs_where %>%
     deaths = sum(Deaths, na.rm = TRUE),
     deaths_per_100 = 100 * deaths / n_crashes,
     .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    severe_share_all = ifelse(sum(severe_n, na.rm = TRUE) > 0,
+                              severe_n / sum(severe_n, na.rm = TRUE),
+                              NA_real_),
+    deaths_share_all = ifelse(sum(deaths, na.rm = TRUE) > 0,
+                              deaths / sum(deaths, na.rm = TRUE),
+                              NA_real_)
   )
 
 hotspots_by_rate <- hotspot_tbl %>%
   dplyr::filter(n_crashes >= min_crashes, severe_n >= min_severe) %>%
-  dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
+  dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(severe_n), dplyr::desc(n_crashes))
 
 hotspots_by_count <- hotspot_tbl %>%
   dplyr::filter(n_crashes >= min_crashes) %>%
-  dplyr::arrange(dplyr::desc(severe_n), dplyr::desc(n_crashes))
+  dplyr::arrange(dplyr::desc(severe_n), dplyr::desc(deaths), dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
 
 hotspots_by_deaths <- hotspot_tbl %>%
   dplyr::filter(n_crashes >= min_crashes) %>%
-  dplyr::arrange(dplyr::desc(deaths), dplyr::desc(n_crashes))
+  dplyr::arrange(dplyr::desc(deaths), dplyr::desc(severe_n), dplyr::desc(n_crashes))
+
+hotspots_policy_tbl <- hotspot_tbl %>%
+  dplyr::filter(n_crashes >= min_crashes, severe_n >= min_severe) %>%
+  classify_burden_risk(
+    burden_var = "severe_n",
+    risk_var = "severe_per_100"
+  )
+
+hotspots_policy_priority <- hotspots_policy_tbl %>%
+  dplyr::mutate(priority_flag = priority_tier == "Priority 1: High burden + high rate") %>%
+  dplyr::arrange(
+    dplyr::desc(priority_flag),
+    dplyr::desc(deaths),
+    dplyr::desc(severe_n),
+    dplyr::desc(severe_per_100),
+    dplyr::desc(n_crashes)
+  ) %>%
+  dplyr::select(-priority_flag)
+
+hotspots_priority_1 <- hotspots_policy_priority %>%
+  dplyr::filter(priority_tier == "Priority 1: High burden + high rate")
 
 cat("\nTop 20 hotspots by Severe/Fatal RATE (min_crashes =", min_crashes,
     ", min_severe =", min_severe, "):\n")
@@ -589,6 +668,9 @@ print(head(hotspots_by_deaths, 20))
 
 cat("\nTop 20 hotspots by Severe/Fatal COUNT (min_crashes =", min_crashes, "):\n")
 print(head(hotspots_by_count, 20))
+
+cat("\nTop policy-priority hotspots (high burden first, then high rate):\n")
+print(head(hotspots_policy_priority, 20))
 ```
 
 # Sanity Check
@@ -1167,7 +1249,7 @@ print(
 )
 ```
 
-# Month and seasonality panel (feature engineering and storyboard-ready rate plot)
+# Month and seasonality panel (feature engineering and storyboard-ready count/rate plots)
 ```{r}
 if (!("COLLISION_DATE" %in% names(switrs_reduced))) {
   stop("COLLISION_DATE not found in switrs_reduced.")
@@ -1205,13 +1287,24 @@ month_tbl <- switrs_reduced %>%
   dplyr::summarise(
     n_crashes = dplyr::n(),
     severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    deaths = sum(Deaths, na.rm = TRUE),
     severe_per_100 = 100 * severe_n / n_crashes,
     .groups = "drop"
   ) %>%
   dplyr::arrange(month_name)
 
-cat("Severe/Fatal rate per 100 crashes by month:\n")
+cat("Month summary (counts + rate):\n")
 print(month_tbl)
+
+ggplot(month_tbl, aes(x = month_name, y = severe_n)) +
+  geom_col(fill = "#1B5E20") +
+  geom_text(aes(label = severe_n), vjust = -0.3, size = 3.5) +
+  labs(
+    title = "Severe/Fatal Crash Count by Month",
+    x = "Month",
+    y = "Severe/Fatal crash count"
+  ) +
+  theme(panel.grid.minor = element_blank())
 
 ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
   geom_col(fill = "#1B5E20") +
@@ -1224,7 +1317,7 @@ ggplot(month_tbl, aes(x = month_name, y = severe_per_100)) +
   theme(panel.grid.minor = element_blank())
 ```
 
-# Bar chart: Severe/Fatal crash rate by day of week
+# Bar chart: Severe/Fatal crash count and rate by day of week
 ```{r severity_by_day_bar, message=FALSE, warning=FALSE}
 if (!all(c("DAY_OF_WEEK", "SevereBinary") %in% names(switrs_reduced))) {
   stop("Need DAY_OF_WEEK and SevereBinary in switrs_reduced.")
@@ -1243,14 +1336,26 @@ day_severity_tbl <- switrs_reduced %>%
   dplyr::summarise(
     total_crashes = dplyr::n(),
     severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    deaths = sum(Deaths, na.rm = TRUE),
     other_n = sum(SevereBinary == "Other", na.rm = TRUE),
     severe_per_100 = 100 * severe_n / total_crashes,
     .groups = "drop"
   ) %>%
   dplyr::arrange(day)
 
-cat("Crash severity by day of week:\n")
+cat("Crash severity by day of week (counts + rate):\n")
 print(day_severity_tbl)
+
+ggplot(day_severity_tbl, aes(x = day, y = severe_n)) +
+  geom_col(fill = "#1B5E20") +
+  geom_text(aes(label = severe_n), vjust = -0.3, size = 3.5) +
+  labs(
+    title = "Severe/Fatal Crash Count by Day of Week",
+    x = "Day of Week",
+    y = "Severe/Fatal crash count"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
 
 ggplot(day_severity_tbl, aes(x = day, y = severe_per_100)) +
   geom_col(fill = "#1B5E20") +
@@ -1261,9 +1366,72 @@ ggplot(day_severity_tbl, aes(x = day, y = severe_per_100)) +
     y = "Severe/Fatal per 100 crashes"
   ) +
   theme_minimal(base_size = 12) +
-  theme(
-    panel.grid.minor = element_blank()
+  theme(panel.grid.minor = element_blank())
+```
+
+# Burden-oriented timing priority table (day group x time bucket)
+```{r timing_priority, message=FALSE, warning=FALSE}
+required_timing_vars <- c("day_group", "time_bucket", "SevereBinary")
+missing_timing_vars <- setdiff(required_timing_vars, names(switrs_reduced))
+if (length(missing_timing_vars) > 0) {
+  stop("Missing required timing vars: ", paste(missing_timing_vars, collapse = ", "))
+}
+
+timing_tbl <- switrs_reduced %>%
+  dplyr::filter(!is.na(day_group), !is.na(time_bucket), !is.na(SevereBinary)) %>%
+  dplyr::group_by(day_group, time_bucket) %>%
+  dplyr::summarise(
+    n_crashes = dplyr::n(),
+    severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+    deaths = sum(Deaths, na.rm = TRUE),
+    severe_per_100 = 100 * severe_n / n_crashes,
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    severe_share_all = ifelse(sum(severe_n, na.rm = TRUE) > 0,
+                              severe_n / sum(severe_n, na.rm = TRUE),
+                              NA_real_)
   )
+
+timing_by_count <- timing_tbl %>%
+  dplyr::arrange(dplyr::desc(severe_n), dplyr::desc(deaths), dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
+
+timing_by_rate <- timing_tbl %>%
+  dplyr::filter(n_crashes >= 30, severe_n >= 3) %>%
+  dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(severe_n), dplyr::desc(n_crashes))
+
+timing_policy_tbl <- timing_tbl %>%
+  dplyr::filter(n_crashes >= 30, severe_n >= 3) %>%
+  classify_burden_risk(
+    burden_var = "severe_n",
+    risk_var = "severe_per_100"
+  ) %>%
+  dplyr::mutate(priority_flag = priority_tier == "Priority 1: High burden + high rate") %>%
+  dplyr::arrange(dplyr::desc(priority_flag), dplyr::desc(severe_n), dplyr::desc(severe_per_100), dplyr::desc(deaths), dplyr::desc(n_crashes)) %>%
+  dplyr::select(-priority_flag)
+
+timing_priority_1 <- timing_policy_tbl %>%
+  dplyr::filter(priority_tier == "Priority 1: High burden + high rate")
+
+cat("Top timing cells by severe/fatal count:\n")
+print(head(timing_by_count, 15))
+
+cat("\nTop timing cells by severe/fatal rate (with stability filter):\n")
+print(head(timing_by_rate, 15))
+
+cat("\nTiming cells prioritized by burden first, then rate:\n")
+print(head(timing_policy_tbl, 15))
+
+ggplot(head(timing_by_count, 12),
+       aes(x = reorder(paste(day_group, time_bucket, sep = " | "), severe_n), y = severe_n)) +
+  geom_col(fill = "#1B5E20") +
+  coord_flip() +
+  labs(
+    title = "Top Day/Time Cells by Severe/Fatal Count",
+    x = NULL,
+    y = "Severe/Fatal crash count"
+  ) +
+  theme(panel.grid.minor = element_blank())
 ```
 
 # Statistics report chunk: Hypothesis tests on Severe/Fatal proportions (week 8 deliverable)
@@ -1538,7 +1706,7 @@ subgroup_test_results$highway_night <- run_subgroup_prop_test(
 )
 ```
 
-# Scenario Ranking (top combinations & rates & counts)
+# Scenario Ranking (top combinations: counts, rates, deaths, and policy priority)
 ```{r}
 df_scen <- switrs_reduced %>%
   dplyr::filter(!is.na(SevereBinary)) %>%
@@ -1619,8 +1787,18 @@ scenario_tbl <- df_scen_complete %>%
   dplyr::summarise(
     n_crashes = dplyr::n(),
     severe_n = sum(is_severe, na.rm = TRUE),
+    deaths = sum(Deaths, na.rm = TRUE),
     severe_per_100 = 100 * severe_n / n_crashes,
+    deaths_per_100 = 100 * deaths / n_crashes,
     .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    severe_share_all = ifelse(sum(severe_n, na.rm = TRUE) > 0,
+                              severe_n / sum(severe_n, na.rm = TRUE),
+                              NA_real_),
+    deaths_share_all = ifelse(sum(deaths, na.rm = TRUE) > 0,
+                              deaths / sum(deaths, na.rm = TRUE),
+                              NA_real_)
   )
 
 min_crashes_count <- 30
@@ -1629,11 +1807,36 @@ min_severe_rate   <- 1
 
 top_by_count <- scenario_tbl %>%
   dplyr::filter(n_crashes >= min_crashes_count) %>%
-  dplyr::arrange(dplyr::desc(severe_n), dplyr::desc(n_crashes))
+  dplyr::arrange(dplyr::desc(severe_n), dplyr::desc(deaths), dplyr::desc(n_crashes), dplyr::desc(severe_per_100))
 
 top_by_rate <- scenario_tbl %>%
   dplyr::filter(n_crashes >= min_crashes_rate, severe_n >= min_severe_rate) %>%
-  dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(n_crashes))
+  dplyr::arrange(dplyr::desc(severe_per_100), dplyr::desc(severe_n), dplyr::desc(n_crashes))
+
+top_by_deaths <- scenario_tbl %>%
+  dplyr::filter(n_crashes >= min_crashes_count) %>%
+  dplyr::arrange(dplyr::desc(deaths), dplyr::desc(severe_n), dplyr::desc(n_crashes))
+
+scenario_policy_tbl <- scenario_tbl %>%
+  dplyr::filter(n_crashes >= min_crashes_count, severe_n >= min_severe_rate) %>%
+  classify_burden_risk(
+    burden_var = "severe_n",
+    risk_var = "severe_per_100"
+  )
+
+scenario_policy_priority <- scenario_policy_tbl %>%
+  dplyr::mutate(priority_flag = priority_tier == "Priority 1: High burden + high rate") %>%
+  dplyr::arrange(
+    dplyr::desc(priority_flag),
+    dplyr::desc(severe_n),
+    dplyr::desc(deaths),
+    dplyr::desc(severe_per_100),
+    dplyr::desc(n_crashes)
+  ) %>%
+  dplyr::select(-priority_flag)
+
+scenario_priority_1 <- scenario_policy_priority %>%
+  dplyr::filter(priority_tier == "Priority 1: High burden + high rate")
 
 cat("\nTop 15 scenarios by Severe/Fatal COUNT",
     "(min_crashes=", min_crashes_count, "):\n", sep = "")
@@ -1645,10 +1848,18 @@ cat("\nTop 15 scenarios by Severe/Fatal RATE",
 print(head(top_by_rate, 15))
 cat("\nScenarios meeting RATE filter:", nrow(top_by_rate), "\n")
 
+cat("\nTop 15 scenarios by DEATHS",
+    "(min_crashes=", min_crashes_count, "):\n", sep = "")
+print(head(top_by_deaths, 15))
+cat("\nScenarios meeting DEATH filter:", nrow(top_by_deaths), "\n")
+
+cat("\nTop scenarios prioritized by burden first, then rate:\n")
+print(head(scenario_policy_priority, 15))
+
 interaction_vars <- intersect(c("night_dui", "rain_speed", "ped_dark"), names(switrs_reduced))
 
 if (length(interaction_vars) > 0) {
-  cat("\nInteraction-term summaries (Severe/Fatal per 100 crashes):\n")
+  cat("\nInteraction-term summaries (counts + rate):\n")
 
   interaction_tbl <- purrr::map_dfr(interaction_vars, function(v) {
     switrs_reduced %>%
@@ -1659,6 +1870,7 @@ if (length(interaction_vars) > 0) {
       dplyr::summarise(
         n_crashes = dplyr::n(),
         severe_n = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+        deaths = sum(Deaths, na.rm = TRUE),
         severe_per_100 = 100 * severe_n / n_crashes,
         .groups = "drop"
       )
@@ -1871,19 +2083,19 @@ if (exists("hotspots_by_count") && nrow(hotspots_by_count) > 0) {
   cat("hotspots_by_count not found or empty — run the hotspots chunk first.\n")
 }
 
-if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
+if (exists("scenario_policy_priority") && nrow(scenario_policy_priority) > 0) {
 
-  p2 <- top_by_rate %>%
+  p2 <- scenario_policy_priority %>%
     slice_head(n = 15) %>%
     mutate(scenario = factor(scenario, levels = rev(scenario))) %>%
-    ggplot(aes(x = scenario, y = severe_per_100)) +
+    ggplot(aes(x = scenario, y = severe_n)) +
     geom_col(fill = "#1B5E20") + 
     coord_flip(clip = "off") +
     labs(
-      title = "Top 15 Scenarios by Severe/Fatal Rate",
-      subtitle = "Higher rate = higher risk intensity (targeted interventions)",
+      title = "Top 15 Scenarios by Policy Priority",
+      subtitle = "High-burden scenarios prioritized first; rate used as secondary risk context",
       x = NULL,
-      y = "Severe/Fatal per 100 crashes"
+      y = "Severe/Fatal crash count"
     ) +
     base_theme_fix +
     theme(axis.text.y = element_text(size = 9))
@@ -1891,7 +2103,7 @@ if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
   print(p2)
 
 } else {
-  cat("top_by_rate not found or empty — run the scenario ranking chunk first.\n")
+  cat("scenario_policy_priority not found or empty — run the scenario ranking chunk first.\n")
 }
 
 interaction_vars <- intersect(c("night_dui","rain_speed","ped_dark"), names(switrs_reduced))
@@ -1941,7 +2153,6 @@ if (length(interaction_vars) > 0) {
   cat("No interaction variables found (night_dui/rain_speed/ped_dark). Re-run the time-feature chunk if needed.\n")
 }
 ```
-
 # Additional compound-risk interaction charts
 ```{r}
 clean_chr <- function(x) {
@@ -2134,14 +2345,14 @@ legend_maps <- list(
     "09"="Automobile Right-of-Way",
     "10"="Pedestrian Right-of-Way",
     "11"="Pedestrian Violation",
-    "12"="Traffic Signals & Signs",
+    "12"="Traffic Signals and Signs",
     "13"="Hazardous Parking",
     "14"="Lights",
     "15"="Brakes",
     "16"="Other Equipment",
     "17"="Other Hazardous Violation",
     "18"="Other Than Driver (or Pedestrian)",
-    "21"="Unsafe Starting/Backing",
+    "21"="Unsafe Starting or Backing",
     "22"="Other Improper Driving",
     "23"="Ped/Other DUI (Alcohol/Drug)",
     "24"="Fell Asleep",
@@ -4576,16 +4787,32 @@ if ("weekend" %in% names(switrs_reduced)) {
 
 top_hotspot <- NA_character_
 top_hotspot_n <- NA_integer_
-if (exists("hotspots_by_count") && nrow(hotspots_by_count) > 0) {
-  top_hotspot <- hotspots_by_count$location_key[1]
-  top_hotspot_n <- hotspots_by_count$severe_n[1]
+top_hotspot_rate <- NA_real_
+if (exists("hotspots_policy_priority") && nrow(hotspots_policy_priority) > 0) {
+  top_hotspot <- hotspots_policy_priority$location_key[1]
+  top_hotspot_n <- hotspots_policy_priority$severe_n[1]
+  top_hotspot_rate <- hotspots_policy_priority$severe_per_100[1]
 }
 
-top_scenario <- NA_character_
-top_scenario_rate <- NA_real_
+top_burden_scenario <- NA_character_
+top_burden_scenario_n <- NA_real_
+if (exists("top_by_count") && nrow(top_by_count) > 0) {
+  top_burden_scenario <- top_by_count$scenario[1]
+  top_burden_scenario_n <- top_by_count$severe_n[1]
+}
+
+top_risk_scenario <- NA_character_
+top_risk_scenario_rate <- NA_real_
 if (exists("top_by_rate") && nrow(top_by_rate) > 0) {
-  top_scenario <- top_by_rate$scenario[1]
-  top_scenario_rate <- top_by_rate$severe_per_100[1]
+  top_risk_scenario <- top_by_rate$scenario[1]
+  top_risk_scenario_rate <- top_by_rate$severe_per_100[1]
+}
+
+top_timing_cell <- NA_character_
+top_timing_cell_n <- NA_real_
+if (exists("timing_policy_tbl") && nrow(timing_policy_tbl) > 0) {
+  top_timing_cell <- paste(timing_policy_tbl$day_group[1], timing_policy_tbl$time_bucket[1], sep = " | ")
+  top_timing_cell_n <- timing_policy_tbl$severe_n[1]
 }
 
 interaction_callouts <- NULL
@@ -4629,19 +4856,47 @@ cat(
   "We analyzed crash-level SWITRS records (one row per CASE_ID) to identify where severe/fatal crashes are most concentrated and under what conditions crash severity is highest.\n\n"
 )
 
+cat(
+  "A key policy distinction in this notebook is between **burden** and **risk**. ",
+  "Burden refers to how many severe/fatal crashes or deaths occur in a location or scenario, ",
+  "while risk refers to the severe/fatal rate within that location or scenario. ",
+  "Because the client’s goal is to save the most lives with limited resources, final recommendations prioritize **high-burden targets first**, then use **rate** to refine which of those targets are especially dangerous.\n\n",
+  sep = ""
+)
+
 if (!is.na(top_hotspot)) {
   cat(
-    "- **Highest-burden hotspot:** The location with the largest severe/fatal crash burden was **",
-    top_hotspot, "** with **", top_hotspot_n, "** severe/fatal crashes.\n",
+    "- **Top policy-priority hotspot:** **",
+    top_hotspot, "** with **", top_hotspot_n,
+    "** severe/fatal crashes and a rate of **", round(top_hotspot_rate, 2),
+    "** severe/fatal crashes per 100 crashes.\n",
     sep = ""
   )
 }
 
-if (!is.na(top_scenario)) {
+if (!is.na(top_burden_scenario)) {
   cat(
-    "- **Highest-risk scenario:** The scenario with the highest severe/fatal rate was **",
-    top_scenario, "** at **", round(top_scenario_rate, 2),
+    "- **Highest-burden scenario:** **",
+    top_burden_scenario, "** with **", top_burden_scenario_n,
+    "** severe/fatal crashes.\n",
+    sep = ""
+  )
+}
+
+if (!is.na(top_risk_scenario)) {
+  cat(
+    "- **Highest-risk scenario:** **",
+    top_risk_scenario, "** at **", round(top_risk_scenario_rate, 2),
     "** severe/fatal crashes per 100 crashes.\n",
+    sep = ""
+  )
+}
+
+if (!is.na(top_timing_cell)) {
+  cat(
+    "- **Highest-priority timing cell:** **",
+    top_timing_cell, "** with **", top_timing_cell_n,
+    "** severe/fatal crashes after applying burden + rate screening.\n",
     sep = ""
   )
 }
@@ -4675,8 +4930,9 @@ cat(
 )
 
 cat("### Recommended actions\n")
-cat("- **Deploy resources first at the highest-burden hotspots** to address the largest concentration of severe/fatal crashes.\n")
-cat("- **Use the highest-risk scenarios** to decide when and under what conditions targeted enforcement or visibility interventions should occur.\n")
+cat("- **Deploy resources first at high-burden hotspots** where the largest number of severe/fatal crashes is occurring.\n")
+cat("- **Within those high-burden targets, prioritize the high-rate subset** to focus on places and conditions that are both common and unusually dangerous.\n")
+cat("- **Use the day/time burden tables** to decide when targeted enforcement or visibility interventions should occur.\n")
 cat("- **Prioritize compound-risk conditions** such as night × DUI, rain × unsafe speed, and pedestrian × dark when designing prevention strategies.\n")
 ```
 
