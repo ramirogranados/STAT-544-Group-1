@@ -2801,6 +2801,165 @@ names(day_violation_tables) <- day_order
 day_violation_tables
 ```
 
+# General violation count/percent table across all days
+```{r general_violation_count_percent_all_days, message=FALSE, warning=FALSE, results='asis'}
+if (!requireNamespace("gt", quietly = TRUE)) install.packages("gt")
+if (!requireNamespace("webshot2", quietly = TRUE)) install.packages("webshot2")
+
+library(dplyr)
+library(stringr)
+library(gt)
+
+general_violation_table <- function(data,
+                                    viol_var = "PCF_VIOL_CATEGORY") {
+  if (!(viol_var %in% names(data))) return(NULL)
+  if (!("SevereBinary" %in% names(data))) return(NULL)
+
+  pcf_map <- c(
+    "01" = "DUI (Alcohol or Drug)",
+    "02" = "Impeding Traffic",
+    "03" = "Unsafe Speed",
+    "04" = "Following Too Closely",
+    "05" = "Wrong Side of Road",
+    "06" = "Improper Passing",
+    "07" = "Unsafe Lane Change",
+    "08" = "Improper Turning",
+    "09" = "Automobile Right-of-Way",
+    "10" = "Pedestrian Right-of-Way",
+    "11" = "Pedestrian Violation",
+    "12" = "Traffic Signals and Signs",
+    "13" = "Hazardous Parking",
+    "14" = "Lights",
+    "15" = "Brakes",
+    "16" = "Other Equipment",
+    "17" = "Other Hazardous Violation",
+    "18" = "Other Than Driver/Pedestrian",
+    "21" = "Unsafe Starting or Backing",
+    "22" = "Other Improper Driving",
+    "23" = "Pedestrian/Other DUI",
+    "24" = "Fell Asleep",
+    "00" = "Unknown"
+  )
+
+  df <- data %>%
+    dplyr::transmute(
+      viol = as.character(.data[[viol_var]]),
+      SevereBinary = as.character(SevereBinary)
+    ) %>%
+    dplyr::mutate(
+      viol = ifelse(is.na(viol) | trimws(viol) == "", "Not Stated", trimws(viol)),
+      viol = stringr::str_pad(viol, width = 2, side = "left", pad = "0")
+    )
+
+  if (exists("legend_maps") && viol_var %in% names(legend_maps)) {
+    df <- df %>%
+      dplyr::mutate(
+        viol_label = dplyr::recode(viol, !!!legend_maps[[viol_var]], .default = viol)
+      )
+  } else {
+    df <- df %>%
+      dplyr::mutate(
+        viol_label = dplyr::recode(viol, !!!pcf_map, .default = viol)
+      )
+  }
+
+  out <- df %>%
+    dplyr::filter(!viol_label %in% c("Unknown", "Not Stated", "00", "-")) %>%
+    dplyr::group_by(viol_label) %>%
+    dplyr::summarise(
+      count = dplyr::n(),
+      severe_count = sum(SevereBinary == "Severe/Fatal", na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      percent = 100 * count / sum(count),
+      severe_percent = 100 * severe_count / count,
+      severe_percent_overall = 100 * severe_count / sum(count)
+    ) %>%
+    dplyr::arrange(
+      dplyr::desc(severe_percent),
+      dplyr::desc(severe_count),
+      dplyr::desc(count)
+    )
+
+  names(out)[names(out) == "viol_label"] <- "Violation"
+  out
+}
+
+general_violation_tbl <- general_violation_table(switrs_reduced)
+
+general_violation_gt <- general_violation_tbl %>%
+  dplyr::mutate(
+    percent = percent / 100,
+    severe_percent = severe_percent / 100,
+    severe_percent_overall = severe_percent_overall / 100
+  ) %>%
+  gt() %>%
+  tab_header(
+    title = md("**General Violation Table (All Days Combined)**")
+  ) %>%
+  cols_label(
+    Violation = "Violation",
+    count = "Count",
+    severe_count = "Severe Count",
+    percent = "Percent",
+    severe_percent = "Severe %",
+    severe_percent_overall = "Severe % Overall"
+  ) %>%
+  fmt_number(
+    columns = c(count, severe_count),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  fmt_percent(
+    columns = c(percent, severe_percent, severe_percent_overall),
+    decimals = 1
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = Violation
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = c(count, severe_count, percent, severe_percent, severe_percent_overall)
+  ) %>%
+  tab_options(
+    table.width = pct(100),
+    data_row.padding = px(4),
+    heading.align = "left"
+  )
+
+# show the table in the notebook
+if (!requireNamespace("gridExtra", quietly = TRUE)) install.packages("gridExtra")
+if (!requireNamespace("grid", quietly = TRUE)) install.packages("grid")
+
+library(gridExtra)
+library(grid)
+
+# show table in notebook
+general_violation_tbl
+
+# save table as image
+dir.create("table_exports", showWarnings = FALSE)
+general_violation_img <- file.path("table_exports", "general_violation_table_all_days.png")
+
+tbl_for_export <- general_violation_tbl %>%
+  dplyr::mutate(
+    percent = sprintf("%.1f%%", percent),
+    severe_percent = sprintf("%.1f%%", severe_percent),
+    severe_percent_overall = sprintf("%.1f%%", severe_percent_overall)
+  )
+
+table_grob <- tableGrob(tbl_for_export, rows = NULL)
+
+png(filename = general_violation_img, width = 1800, height = 1200, res = 150)
+grid.newpage()
+grid.draw(table_grob)
+dev.off()
+
+cat("\nSaved image to:", general_violation_img, "\n")
+```
+
 # Correlation Check (numeric predictors)
 ```{r}
 num_vars <- names(switrs_reduced)[sapply(switrs_reduced, is.numeric)]
@@ -5990,8 +6149,9 @@ print(head(rf_wt_importance_tbl, 20))
 ```
 
 # Model Comparison
-```{r all_model_compare_original_and_undersampled, message=FALSE, warning=FALSE}
+```{r all_model_compare_original_and_undersampled, message=FALSE, warning=FALSE, fig.align='center', out.width='100%'}
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+if (!requireNamespace("gridExtra", quietly = TRUE)) install.packages("gridExtra")
 
 metric_at_cutoff_unified <- function(truth, prob, cutoff, positive = "Severe/Fatal") {
   truth_chr <- if (is.factor(truth) || is.character(truth)) {
@@ -6033,11 +6193,18 @@ auc_unified <- function(truth, prob, positive = "Severe/Fatal") {
   if (all(na.omit(unique(truth_chr)) %in% c("0", "1"))) {
     truth01 <- as.integer(truth_chr)
     return(as.numeric(
-      pROC::auc(pROC::roc(response = truth01, predictor = prob, quiet = TRUE))
+      pROC::auc(
+        pROC::roc(
+          response = truth01,
+          predictor = prob,
+          quiet = TRUE
+        )
+      )
     ))
   }
 
   truth_fac <- factor(truth_chr, levels = c("Other", positive))
+
   as.numeric(
     pROC::auc(
       pROC::roc(
@@ -6076,7 +6243,12 @@ build_model_rows <- function(model_name, truth, prob,
 
   auc_val <- auc_unified(truth, prob, positive = positive)
 
-  row_05 <- metric_at_cutoff_unified(truth, prob, cutoff = 0.50, positive = positive)
+  row_05 <- metric_at_cutoff_unified(
+    truth = truth,
+    prob = prob,
+    cutoff = 0.50,
+    positive = positive
+  )
   row_05$model <- model_name
   row_05$threshold <- threshold_label_05
 
@@ -6084,7 +6256,8 @@ build_model_rows <- function(model_name, truth, prob,
 
   if (isTRUE(include_prevalence_row)) {
     row_prev <- metric_at_cutoff_unified(
-      truth, prob,
+      truth = truth,
+      prob = prob,
       cutoff = prevalence_cutoff,
       positive = positive
     )
@@ -6162,7 +6335,6 @@ if (exists("test_rf_wt") && exists("rf_wt_test_phat")) {
 
 # -------------------------
 # Undersampled models
-# Keep only 0.50 here so these rows are easy to compare side-by-side
 # -------------------------
 if (exists("test_set_us") && exists("baseline_glm_us_test_phat")) {
   all_model_rows[["baseline_us"]] <- build_model_rows(
@@ -6213,19 +6385,164 @@ if (length(all_model_rows) == 0) {
   stop("No model predictions found. Run at least one original or undersampled model chunk first.")
 }
 
-all_model_compare_tbl <- dplyr::bind_rows(all_model_rows) %>%
+# -------------------------
+# Build ordered comparison table
+# -------------------------
+all_model_compare_tbl_full <- dplyr::bind_rows(all_model_rows) %>%
   dplyr::mutate(
-    model_group = dplyr::case_when(
-      grepl("Undersampled 1:1", model) ~ "Undersampled 1:1",
+    version = dplyr::case_when(
+      grepl("Undersampled 1:1", model) ~ "Undersampled",
       TRUE ~ "Original"
+    ),
+    model_family = dplyr::case_when(
+      grepl("^Baseline GLM \\+ Subgroup Extension", model) ~ "Baseline GLM + Subgroup",
+      grepl("^Baseline GLM($| \\(Undersampled 1:1\\)$)", model) ~ "Baseline GLM",
+      grepl("^LASSO GLMNET", model) ~ "LASSO GLMNET",
+      grepl("^Random Forest \\(Class-Weighted\\)", model) ~ "RF (Class-Weighted)",
+      grepl("^Random Forest($| \\(Undersampled 1:1\\)$)", model) ~ "Random Forest",
+      grepl("^Targeted Scenario GLM", model) ~ "Targeted Scenario GLM",
+      TRUE ~ model
+    ),
+    family_order = dplyr::case_when(
+      model_family == "Baseline GLM" ~ 1L,
+      model_family == "Baseline GLM + Subgroup" ~ 2L,
+      model_family == "LASSO GLMNET" ~ 3L,
+      model_family == "Random Forest" ~ 4L,
+      model_family == "RF (Class-Weighted)" ~ 5L,
+      model_family == "Targeted Scenario GLM" ~ 6L,
+      TRUE ~ 99L
+    ),
+    version_order = dplyr::case_when(
+      version == "Original" ~ 1L,
+      version == "Undersampled" ~ 2L,
+      TRUE ~ 99L
+    ),
+    threshold_order = dplyr::case_when(
+      threshold == "0.50" ~ 1L,
+      TRUE ~ 2L
+    ),
+    threshold_short = dplyr::case_when(
+      threshold == "0.50" ~ "0.50",
+      TRUE ~ "Prev cutoff"
     )
   ) %>%
-  dplyr::arrange(model_group, dplyr::desc(test_auc), threshold)
+  dplyr::arrange(family_order, version_order, threshold_order)
+
+all_model_compare_tbl <- all_model_compare_tbl_full %>%
+  dplyr::select(
+    model = model_family,
+    version,
+    threshold = threshold_short,
+    test_auc,
+    sensitivity,
+    specificity,
+    precision,
+    accuracy
+  )
 
 cat("\nUnified model comparison table:\n")
 print(all_model_compare_tbl)
 
-auc_only_tbl <- all_model_compare_tbl %>%
-  dplyr::distinct(model, model_group, test_auc) %>%
-  dplyr::arrange(model_group, dplyr::desc(test_auc))
+auc_only_tbl <- all_model_compare_tbl_full %>%
+  dplyr::distinct(model_family, version, test_auc, family_order, version_order) %>%
+  dplyr::arrange(family_order, version_order) %>%
+  dplyr::select(model = model_family, version, test_auc)
+
+# -------------------------
+# Export a cleaner image for slides
+# -------------------------
+table_for_export <- all_model_compare_tbl %>%
+  dplyr::mutate(
+    test_auc    = sprintf("%.4f", test_auc),
+    sensitivity = sprintf("%.4f", sensitivity),
+    specificity = sprintf("%.4f", specificity),
+    precision   = sprintf("%.4f", precision),
+    accuracy    = sprintf("%.4f", accuracy)
+  )
+
+dir.create("table_exports", showWarnings = FALSE)
+table_png_path <- file.path("table_exports", "model_comparison_table.png")
+
+n_rows <- nrow(table_for_export)
+
+table_theme <- gridExtra::ttheme_minimal(
+  base_size = 13,
+  core = list(
+    fg_params = list(fontsize = 12, col = "black"),
+    bg_params = list(fill = "white", col = "#D9D9D9")
+  ),
+  colhead = list(
+    fg_params = list(fontsize = 13, fontface = "bold", col = "white"),
+    bg_params = list(fill = dark_green, col = "white")
+  )
+)
+
+tbl_grob <- gridExtra::tableGrob(
+  table_for_export,
+  rows = NULL,
+  theme = table_theme
+)
+
+# Set column widths
+tbl_grob$widths[1] <- grid::unit(3.3, "in")  # model
+tbl_grob$widths[2] <- grid::unit(1.5, "in")  # version
+tbl_grob$widths[3] <- grid::unit(1.4, "in")  # threshold
+tbl_grob$widths[4] <- grid::unit(1.0, "in")  # auc
+tbl_grob$widths[5] <- grid::unit(1.1, "in")  # sens
+tbl_grob$widths[6] <- grid::unit(1.1, "in")  # spec
+tbl_grob$widths[7] <- grid::unit(1.0, "in")  # precision
+tbl_grob$widths[8] <- grid::unit(1.0, "in")  # accuracy
+
+# Set row heights
+tbl_grob$heights <- rep(grid::unit(0.34, "in"), length(tbl_grob$heights))
+
+# Standard alternating-row theme
+for (i in seq_along(tbl_grob$grobs)) {
+  grob_name <- tbl_grob$layout$name[i]
+  col_num   <- tbl_grob$layout$l[i]
+  row_num   <- tbl_grob$layout$t[i]
+
+  # Zebra striping for body rows only
+  if (grob_name == "core-bg") {
+    body_row <- row_num - 1
+    fill_col <- if (body_row %% 2 == 1) "white" else "#A8D5BA"
+    tbl_grob$grobs[[i]]$gp$fill <- fill_col
+    tbl_grob$grobs[[i]]$gp$col  <- "#D9D9D9"
+  }
+
+  # Header style
+ if (grob_name == "core-bg") {
+  body_row <- row_num - 1
+  fill_col <- if (body_row %% 2 == 1) "#A8D5BA" else "#F5F5F5"
+  tbl_grob$grobs[[i]]$gp$fill <- fill_col
+  tbl_grob$grobs[[i]]$gp$col  <- "#D9D9D9"
+}
+
+  # Text alignment
+  if (grob_name %in% c("core-fg", "colhead-fg")) {
+    if (col_num %in% c(1, 2, 3)) {
+      tbl_grob$grobs[[i]]$hjust <- 0
+      tbl_grob$grobs[[i]]$x <- grid::unit(0.03, "npc")
+    } else {
+      tbl_grob$grobs[[i]]$hjust <- 0.5
+      tbl_grob$grobs[[i]]$x <- grid::unit(0.5, "npc")
+    }
+  }
+}
+
+png_height <- max(1400, 220 + 70 * (n_rows + 1))
+
+png(
+  filename = table_png_path,
+  width = 3000,
+  height = png_height,
+  res = 220
+)
+grid::grid.newpage()
+grid::grid.draw(tbl_grob)
+dev.off()
+
+cat("\nSaved table image to:", table_png_path, "\n\n")
+knitr::include_graphics(table_png_path)
 ```
+
