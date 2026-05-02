@@ -673,6 +673,91 @@ cat("\nTop policy-priority hotspots (high burden first, then high rate):\n")
 print(head(hotspots_policy_priority, 20))
 ```
 
+# Stacked bar charts: Top 20 hotspots by Severe/Fatal RATE
+```{r hotspot_rate_stacked_bars, message=FALSE, warning=FALSE, fig.width=13, fig.height=10}
+top20_hotspots_rate <- hotspots_by_rate %>%
+  dplyr::slice_head(n = 20) %>%
+  dplyr::mutate(
+    location_label = paste0(
+      stringr::str_trunc(location_key, 55),
+      " | ",
+      sprintf("%.1f%%", severe_per_100),
+      " severe/fatal | n=",
+      n_crashes
+    )
+  )
+
+if (nrow(top20_hotspots_rate) == 0) {
+  cat("No hotspot rows met the filtering thresholds for plotting.")
+} else {
+
+  hotspot_rate_plot_df <- switrs_where %>%
+    dplyr::semi_join(
+      top20_hotspots_rate,
+      by = c("location_type", "location_key")
+    ) %>%
+    dplyr::mutate(
+      severity_group = dplyr::if_else(
+        as.character(SevereBinary) == "Severe/Fatal",
+        "Severe/Fatal",
+        "Other"
+      )
+    ) %>%
+    dplyr::count(location_type, location_key, severity_group, name = "n") %>%
+    dplyr::left_join(
+      top20_hotspots_rate %>%
+        dplyr::select(location_type, location_key, severe_per_100, n_crashes, location_label),
+      by = c("location_type", "location_key")
+    ) %>%
+    dplyr::mutate(
+      location_label = forcats::fct_reorder(location_label, severe_per_100)
+    )
+
+  hotspot_fill_colors <- c(
+    "Other" = "#A8D5BA",
+    "Severe/Fatal" = "#1B5E20"
+  )
+
+  # 100% stacked bar chart (best for RATE)
+  ggplot(hotspot_rate_plot_df,
+         aes(x = location_label, y = n, fill = severity_group)) +
+    geom_col(position = "fill", width = 0.8) +
+    coord_flip() +
+    scale_y_continuous(labels = scales::percent_format()) +
+    scale_fill_manual(values = hotspot_fill_colors, breaks = c("Other", "Severe/Fatal")) +
+    labs(
+      title = "Top 20 Hotspots by Severe/Fatal Rate",
+      subtitle = "100% stacked bars ordered by Severe/Fatal rate",
+      x = NULL,
+      y = "Share of crashes",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(face = "bold")
+    )
+
+  # Regular stacked count chart (same top 20, shows burden too)
+  ggplot(hotspot_rate_plot_df,
+         aes(x = location_label, y = n, fill = severity_group)) +
+    geom_col(width = 0.8) +
+    coord_flip() +
+    scale_fill_manual(values = hotspot_fill_colors, breaks = c("Other", "Severe/Fatal")) +
+    labs(
+      title = "Top 20 Hotspots by Severe/Fatal Rate",
+      subtitle = "Stacked counts for the same Top 20 rate-ranked hotspots",
+      x = NULL,
+      y = "Number of crashes",
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(face = "bold")
+    )
+}
+```
 # Sanity Check
 ```{r}
 dplyr::count(switrs_where, location_type)
@@ -2960,6 +3045,79 @@ dev.off()
 cat("\nSaved image to:", general_violation_img, "\n")
 ```
 
+# General violation stacked bar chart across all days
+```{r general_violation_stacked_all_days, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!requireNamespace("tidyr", quietly = TRUE)) install.packages("tidyr")
+if (!requireNamespace("scales", quietly = TRUE)) install.packages("scales")
+if (!requireNamespace("stringr", quietly = TRUE)) install.packages("stringr")
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(stringr)
+
+# Rebuild table if needed
+if (!exists("general_violation_tbl")) {
+  general_violation_tbl <- general_violation_table(switrs_reduced)
+}
+
+stacked_tbl <- general_violation_tbl %>%
+  mutate(
+    non_severe_count = count - severe_count,
+    Violation = stringr::str_wrap(Violation, width = 28)
+  ) %>%
+  arrange(desc(count)) %>%
+  mutate(Violation = factor(Violation, levels = rev(unique(Violation)))) %>%
+  select(Violation, non_severe_count, severe_count) %>%
+  pivot_longer(
+    cols = c(non_severe_count, severe_count),
+    names_to = "Severity",
+    values_to = "n"
+  ) %>%
+  mutate(
+    Severity = recode(
+      Severity,
+      non_severe_count = "Non-Severe",
+      severe_count = "Severe/Fatal"
+    )
+  )
+
+ggplot(stacked_tbl, aes(x = Violation, y = n, fill = Severity)) +
+  geom_col(width = 0.8) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(
+      "Non-Severe" = "#A8D5BA",
+      "Severe/Fatal" = "#1B5E20"
+    )
+  ) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "General Violation Counts Across All Days",
+    subtitle = "Stacked by severe/fatal vs non-severe crashes",
+    x = NULL,
+    y = "Crash Count",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold"),
+    legend.position = "top"
+  )
+
+# Optional save
+dir.create("table_exports", showWarnings = FALSE)
+ggsave(
+  file.path("table_exports", "general_violation_stacked_all_days.png"),
+  width = 11,
+  height = 8,
+  dpi = 300
+)
+```
+
 # Correlation Check (numeric predictors)
 ```{r}
 num_vars <- names(switrs_reduced)[sapply(switrs_reduced, is.numeric)]
@@ -5011,6 +5169,138 @@ if (length(interaction_vars) > 0) {
   interaction_callouts <- interaction_callouts[!is.na(interaction_callouts)]
 }
 
+# ---------------------------------------------------------
+# Scenario-specific PCF violation summaries
+# ---------------------------------------------------------
+pcf_map_exec <- c(
+  "01" = "DUI (Alcohol/Drug)",
+  "02" = "Impeding Traffic",
+  "03" = "Unsafe Speed",
+  "04" = "Following Too Closely",
+  "05" = "Wrong Side of Road",
+  "06" = "Improper Passing",
+  "07" = "Unsafe Lane Change",
+  "08" = "Improper Turning",
+  "09" = "Automobile Right-of-Way",
+  "10" = "Pedestrian Right-of-Way",
+  "11" = "Pedestrian Violation",
+  "12" = "Traffic Signals and Signs",
+  "13" = "Hazardous Parking",
+  "14" = "Lights",
+  "15" = "Brakes",
+  "16" = "Other Equipment",
+  "17" = "Other Hazardous Violation",
+  "18" = "Other Than Driver (or Pedestrian)",
+  "21" = "Unsafe Starting or Backing",
+  "22" = "Other Improper Driving",
+  "23" = "Ped/Other DUI (Alcohol/Drug)",
+  "24" = "Fell Asleep",
+  "00" = "Unknown",
+  "Not Stated" = "Not Stated"
+)
+
+top_burden_pcf <- NA_character_
+top_burden_pcf_n <- NA_real_
+
+top_risk_pcf <- NA_character_
+top_risk_pcf_n <- NA_real_
+
+top_timing_pcf <- NA_character_
+top_timing_pcf_n <- NA_real_
+
+if (exists("df_scen_complete") &&
+    nrow(df_scen_complete) > 0 &&
+    "PCF_VIOL_CATEGORY" %in% names(df_scen_complete)) {
+
+  scenario_pcf_tbl <- df_scen_complete %>%
+    dplyr::mutate(
+      scenario = paste(
+        paste0("Time=", time_bucket),
+        paste0("DayType=", weekend),
+        paste0("Light=", light),
+        paste0("Impairment=", impairment),
+        paste0("Ped=", ped),
+        sep = " | "
+      ),
+      pcf_code = trimws(as.character(PCF_VIOL_CATEGORY)),
+      pcf_code = dplyr::case_when(
+        is.na(pcf_code) | pcf_code == "" ~ "Not Stated",
+        pcf_code == "Not Stated" ~ "Not Stated",
+        stringr::str_detect(pcf_code, "^[0-9]+$") ~ stringr::str_pad(pcf_code, width = 2, pad = "0"),
+        TRUE ~ pcf_code
+      ),
+      pcf_label = dplyr::coalesce(unname(pcf_map_exec[pcf_code]), pcf_code)
+    ) %>%
+    dplyr::filter(SevereBinary == "Severe/Fatal") %>%
+    dplyr::group_by(scenario, pcf_label) %>%
+    dplyr::summarise(pcf_severe_n = dplyr::n(), .groups = "drop") %>%
+    dplyr::arrange(scenario, dplyr::desc(pcf_severe_n), pcf_label) %>%
+    dplyr::group_by(scenario) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup()
+
+  if (!is.na(top_burden_scenario)) {
+    tmp <- scenario_pcf_tbl %>%
+      dplyr::filter(scenario == top_burden_scenario) %>%
+      dplyr::slice(1)
+
+    if (nrow(tmp) > 0) {
+      top_burden_pcf <- tmp$pcf_label[1]
+      top_burden_pcf_n <- tmp$pcf_severe_n[1]
+    }
+  }
+
+  if (!is.na(top_risk_scenario)) {
+    tmp <- scenario_pcf_tbl %>%
+      dplyr::filter(scenario == top_risk_scenario) %>%
+      dplyr::slice(1)
+
+    if (nrow(tmp) > 0) {
+      top_risk_pcf <- tmp$pcf_label[1]
+      top_risk_pcf_n <- tmp$pcf_severe_n[1]
+    }
+  }
+}
+
+if (!is.na(top_timing_cell) &&
+    all(c("day_group", "time_bucket", "PCF_VIOL_CATEGORY", "SevereBinary") %in% names(switrs_reduced))) {
+
+  timing_parts <- strsplit(top_timing_cell, " \\| ")[[1]]
+
+  if (length(timing_parts) == 2) {
+    top_day_group <- trimws(timing_parts[1])
+    top_time_bucket <- trimws(timing_parts[2])
+
+    timing_pcf_tbl <- switrs_reduced %>%
+      dplyr::filter(
+        !is.na(day_group),
+        !is.na(time_bucket),
+        !is.na(SevereBinary),
+        SevereBinary == "Severe/Fatal",
+        as.character(day_group) == top_day_group,
+        as.character(time_bucket) == top_time_bucket
+      ) %>%
+      dplyr::mutate(
+        pcf_code = trimws(as.character(PCF_VIOL_CATEGORY)),
+        pcf_code = dplyr::case_when(
+          is.na(pcf_code) | pcf_code == "" ~ "Not Stated",
+          pcf_code == "Not Stated" ~ "Not Stated",
+          stringr::str_detect(pcf_code, "^[0-9]+$") ~ stringr::str_pad(pcf_code, width = 2, pad = "0"),
+          TRUE ~ pcf_code
+        ),
+        pcf_label = dplyr::coalesce(unname(pcf_map_exec[pcf_code]), pcf_code)
+      ) %>%
+      dplyr::count(pcf_label, name = "pcf_severe_n") %>%
+      dplyr::arrange(dplyr::desc(pcf_severe_n), pcf_label) %>%
+      dplyr::slice(1)
+
+    if (nrow(timing_pcf_tbl) > 0) {
+      top_timing_pcf <- timing_pcf_tbl$pcf_label[1]
+      top_timing_pcf_n <- timing_pcf_tbl$pcf_severe_n[1]
+    }
+  }
+}
+
 cat(
   "We analyzed crash-level SWITRS records (one row per CASE_ID) to identify where severe/fatal crashes are most concentrated and under what conditions crash severity is highest.\n\n"
 )
@@ -5037,7 +5327,12 @@ if (!is.na(top_burden_scenario)) {
   cat(
     "- **Highest-burden scenario:** **",
     top_burden_scenario, "** with **", top_burden_scenario_n,
-    "** severe/fatal crashes.\n",
+    "** severe/fatal crashes",
+    if (!is.na(top_burden_pcf))
+      paste0(" | **Top PCF violation in this scenario:** ", top_burden_pcf,
+             " (", top_burden_pcf_n, " severe/fatal crashes)")
+    else "",
+    ".\n",
     sep = ""
   )
 }
@@ -5046,7 +5341,12 @@ if (!is.na(top_risk_scenario)) {
   cat(
     "- **Highest-risk scenario:** **",
     top_risk_scenario, "** at **", round(top_risk_scenario_rate, 2),
-    "** severe/fatal crashes per 100 crashes.\n",
+    "** severe/fatal crashes per 100 crashes",
+    if (!is.na(top_risk_pcf))
+      paste0(" | **Top PCF violation in this scenario:** ", top_risk_pcf,
+             " (", top_risk_pcf_n, " severe/fatal crashes)")
+    else "",
+    ".\n",
     sep = ""
   )
 }
@@ -5055,7 +5355,12 @@ if (!is.na(top_timing_cell)) {
   cat(
     "- **Highest-priority timing cell:** **",
     top_timing_cell, "** with **", top_timing_cell_n,
-    "** severe/fatal crashes after applying burden + rate screening.\n",
+    "** severe/fatal crashes after applying burden + rate screening",
+    if (!is.na(top_timing_pcf))
+      paste0(" | **Top PCF violation in this timing cell:** ", top_timing_pcf,
+             " (", top_timing_pcf_n, " severe/fatal crashes)")
+    else "",
+    ".\n",
     sep = ""
   )
 }
@@ -6451,6 +6756,9 @@ auc_only_tbl <- all_model_compare_tbl_full %>%
 # -------------------------
 # Export a cleaner image for slides
 # -------------------------
+dark_green <- "#1B5E20"
+light_green <- "#A8D5BA"
+
 table_for_export <- all_model_compare_tbl %>%
   dplyr::mutate(
     test_auc    = sprintf("%.4f", test_auc),
@@ -6484,19 +6792,19 @@ tbl_grob <- gridExtra::tableGrob(
 )
 
 # Set column widths
-tbl_grob$widths[1] <- grid::unit(3.3, "in")  # model
-tbl_grob$widths[2] <- grid::unit(1.5, "in")  # version
-tbl_grob$widths[3] <- grid::unit(1.4, "in")  # threshold
-tbl_grob$widths[4] <- grid::unit(1.0, "in")  # auc
-tbl_grob$widths[5] <- grid::unit(1.1, "in")  # sens
-tbl_grob$widths[6] <- grid::unit(1.1, "in")  # spec
-tbl_grob$widths[7] <- grid::unit(1.0, "in")  # precision
-tbl_grob$widths[8] <- grid::unit(1.0, "in")  # accuracy
+tbl_grob$widths[1] <- grid::unit(3.3, "in")
+tbl_grob$widths[2] <- grid::unit(1.5, "in")
+tbl_grob$widths[3] <- grid::unit(1.4, "in")
+tbl_grob$widths[4] <- grid::unit(1.0, "in")
+tbl_grob$widths[5] <- grid::unit(1.1, "in")
+tbl_grob$widths[6] <- grid::unit(1.1, "in")
+tbl_grob$widths[7] <- grid::unit(1.0, "in")
+tbl_grob$widths[8] <- grid::unit(1.0, "in")
 
 # Set row heights
 tbl_grob$heights <- rep(grid::unit(0.34, "in"), length(tbl_grob$heights))
 
-# Standard alternating-row theme
+# Apply standard alternating-row theme
 for (i in seq_along(tbl_grob$grobs)) {
   grob_name <- tbl_grob$layout$name[i]
   col_num   <- tbl_grob$layout$l[i]
@@ -6505,18 +6813,16 @@ for (i in seq_along(tbl_grob$grobs)) {
   # Zebra striping for body rows only
   if (grob_name == "core-bg") {
     body_row <- row_num - 1
-    fill_col <- if (body_row %% 2 == 1) "white" else "#A8D5BA"
+    fill_col <- if (body_row %% 2 == 1) "white" else light_green
     tbl_grob$grobs[[i]]$gp$fill <- fill_col
     tbl_grob$grobs[[i]]$gp$col  <- "#D9D9D9"
   }
 
   # Header style
- if (grob_name == "core-bg") {
-  body_row <- row_num - 1
-  fill_col <- if (body_row %% 2 == 1) "#A8D5BA" else "#F5F5F5"
-  tbl_grob$grobs[[i]]$gp$fill <- fill_col
-  tbl_grob$grobs[[i]]$gp$col  <- "#D9D9D9"
-}
+  if (grob_name == "colhead-bg") {
+    tbl_grob$grobs[[i]]$gp$fill <- dark_green
+    tbl_grob$grobs[[i]]$gp$col  <- "white"
+  }
 
   # Text alignment
   if (grob_name %in% c("core-fg", "colhead-fg")) {
@@ -6545,4 +6851,3 @@ dev.off()
 cat("\nSaved table image to:", table_png_path, "\n\n")
 knitr::include_graphics(table_png_path)
 ```
-
